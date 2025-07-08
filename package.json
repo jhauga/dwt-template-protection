@@ -1,0 +1,104 @@
+{
+    "name": "dwt-template-protection",
+    "displayName": "Dreamweaver Template Protection",
+    "description": "Protects non-editable regions in files using Dreamweaver's .dwt template syntax.",
+    "publisher": "YinsPeace",
+    "version": "1.0.2",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/YinsPeace/dwt-template-protection.git"
+    },
+    "icon": "images/icon.png",
+    "engines": {
+        "vscode": "^1.74.0"
+    },
+    "categories": [
+        "Other"
+    ],
+    "keywords": [
+        "dreamweaver",
+        "template",
+        "dwt",
+        "protection",
+        "readonly",
+
+        "editable-regions"
+    ],
+    "activationEvents": [
+        "*"
+    ],
+    "main": "./out/extension.js",
+    "contributes": {
+        "commands": [
+            {
+                "command": "dreamweaverTemplate.showEditableRegions",
+                "title": "Show Editable Regions",
+                "category": "Dreamweaver Template"
+            },
+            {
+                "command": "dreamweaverTemplate.toggleProtection",
+                "title": "Toggle Protection",
+                "category": "Dreamweaver Template"
+            }
+        ],
+        "menus": {
+            "editor/context": [
+                {
+                    "when": "resourceExtname =~ /\\.(html|htm|php|asp|csp)$/",
+                    "command": "dreamweaverTemplate.showEditableRegions",
+                    "group": "dreamweaver"
+                },
+                {
+                    "when": "resourceExtname =~ /\\.(html|htm|php|asp|csp)$/",
+                    "command": "dreamweaverTemplate.toggleProtection",
+                    "group": "dreamweaver"
+                }
+            ],
+            "commandPalette": [
+                {
+                    "command": "dreamweaverTemplate.showEditableRegions",
+                    "when": "resourceExtname =~ /\\.(html|htm|php|asp|csp)$/"
+                },
+                {
+                    "command": "dreamweaverTemplate.toggleProtection",
+                    "when": "resourceExtname =~ /\\.(html|htm|php|asp|csp)$/"
+                }
+            ]
+        },
+        "configuration": {
+            "title": "Dreamweaver Template Protection",
+            "properties": {
+                "dreamweaverTemplate.enableProtection": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Enable protection of non-editable regions in Dreamweaver templates"
+                },
+                "dreamweaverTemplate.showWarnings": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Show warning messages when trying to edit protected regions"
+                },
+                "dreamweaverTemplate.highlightEditableRegions": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Highlight editable regions with a green border"
+                },
+                "dreamweaverTemplate.highlightProtectedRegions": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Highlight protected regions with a red background"
+                }
+            }
+        }
+    },
+    "scripts": {
+        "vscode:prepublish": "npm run compile",
+        "compile": "tsc -p ./",
+        "watch": "tsc -watch -p ./"
+    },
+    "devDependencies": {
+        "@types/vscode": "^1.74.0",
+        "@types/node": "16.x",
+        "typescript": "^4.9.4"
+    }
+}
