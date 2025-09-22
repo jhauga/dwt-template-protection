@@ -39,6 +39,21 @@
                 "command": "dreamweaverTemplate.toggleProtection",
                 "title": "Toggle Protection",
                 "category": "Dreamweaver Template"
+            },
+            {
+                "command": "dreamweaverTemplate.syncTemplate",
+                "title": "Sync Template to Instances",
+                "category": "Dreamweaver Template"
+            },
+            {
+                "command": "dreamweaverTemplate.toggleTemplateSync",
+                "title": "Toggle Template Synchronization",
+                "category": "Dreamweaver Template"
+            },
+            {
+                "command": "dreamweaverTemplate.findInstances",
+                "title": "Find Template Instances",
+                "category": "Dreamweaver Template"
             }
         ],
         "menus": {
@@ -52,6 +67,16 @@
                     "when": "resourceExtname =~ /\\.(html|htm|php|asp|csp)$/",
                     "command": "dreamweaverTemplate.toggleProtection",
                     "group": "dreamweaver"
+                },
+                {
+                    "when": "resourceExtname == .dwt",
+                    "command": "dreamweaverTemplate.syncTemplate",
+                    "group": "dreamweaver"
+                },
+                {
+                    "when": "resourceExtname == .dwt",
+                    "command": "dreamweaverTemplate.findInstances",
+                    "group": "dreamweaver"
                 }
             ],
             "commandPalette": [
@@ -62,6 +87,17 @@
                 {
                     "command": "dreamweaverTemplate.toggleProtection",
                     "when": "resourceExtname =~ /\\.(html|htm|php|asp|csp)$/"
+                },
+                {
+                    "command": "dreamweaverTemplate.syncTemplate",
+                    "when": "resourceExtname == .dwt"
+                },
+                {
+                    "command": "dreamweaverTemplate.toggleTemplateSync"
+                },
+                {
+                    "command": "dreamweaverTemplate.findInstances",
+                    "when": "resourceExtname == .dwt"
                 }
             ]
         },
@@ -87,6 +123,16 @@
                     "type": "boolean",
                     "default": true,
                     "description": "Highlight protected regions with a red background"
+                },
+                "dreamweaverTemplate.autoSyncOnTemplateChange": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Automatically sync template changes to instance files"
+                },
+                "dreamweaverTemplate.enableTemplateSync": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Enable template synchronization functionality"
                 }
             }
         }
