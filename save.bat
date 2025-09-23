@@ -4,8 +4,6 @@ REM save
 
 cd /D "%~dp0site" 
 
-7z a site.zip .
-
-move /Y site.zip ..
+tar -acf ../site.zip *
 
 cd ..

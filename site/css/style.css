@@ -656,6 +656,9 @@
   .package li:last-child, .pricing-tier li:last-child {
    border-bottom: none;
   }
+  h1#pageTitle {
+    margin-top: 70px;
+}
   h1 {
    margin-left: 20px;
   }
