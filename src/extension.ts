@@ -10,7 +10,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     initializeDecorations();
 
-        function getPositionAt(text: string, index: number): vscode.Position {
+    function getPositionAt(text: string, index: number): vscode.Position {
         const lines = text.substring(0, index).split('\n');
         const line = lines.length - 1;
         const character = lines[line].length;
@@ -97,7 +97,7 @@ export function activate(context: vscode.ExtensionContext) {
     }
 
     function showEditableRegionsList(document: vscode.TextDocument) {
-        
+
         const text = document.getText();
         const editableRanges = getEditableRanges(document);
         const regionNames: string[] = [];
@@ -211,7 +211,7 @@ export function activate(context: vscode.ExtensionContext) {
             const config = vscode.workspace.getConfiguration('dreamweaverTemplate');
             const isEnabled = config.get('enableProtection', true);
             config.update('enableProtection', !isEnabled, vscode.ConfigurationTarget.Global).then(() => {
-                updateDecorations(editor); 
+                updateDecorations(editor);
                 vscode.window.showInformationMessage(`Dreamweaver template protection ${!isEnabled ? 'enabled' : 'disabled'}.`);
             });
         }

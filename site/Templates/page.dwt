@@ -1,0 +1,63 @@
+<!doctype html>
+<html>
+<head>
+<!-- TemplateInfo codeOutsideHTMLIsLocked="true" -->	
+<meta charset="utf-8">
+<link rel="icon" href="/favicon.png">
+<!-- TemplateBeginEditable name="doctitle" -->
+<title>Test dwt-template-protection</title>
+<!-- TemplateEndEditable -->
+
+<link rel="stylesheet" href="/css/style.css">
+<!-- TemplateBeginEditable name="head" -->
+
+<!-- TemplateEndEditable -->
+</head>
+
+<body>
+ <div class="nav">
+  <nav>
+   <ul>
+    <li><a href="/index.html">Home</a></li>
+    <span> | </span>
+    <li><a href="/about.html">About</a></li>
+    <li><a href="/blog.html">Blog</a></li>
+    <li><a href="/gallery.html">Gallery</a></li>
+    <li class="dropdown">
+     <a href="#" class="dropbtn">Services ▼</a>
+     <div class="dropdown-content">
+      <a href="/webDevelopment.html">Web Development</a>
+      <a href="/graphicDesign.html">Graphic Design</a>
+     </div>
+    </li>
+    <li><a href="/contact.html">Contact</a></li>
+   </ul>
+  </nav>
+ </div>
+ 
+<!-- TemplateBeginEditable name="main" -->
+ <h1 id="pageTitle"></h1>
+ <hr>
+ <main>
+  <div>
+   <h2></h2>
+   <p></p>
+  </div>
+ </main>
+
+<!-- TemplateEndEditable -->
+
+ <footer> 
+ <!-- TemplateBeginEditable name="footer" --> 
+  <p>Footer message.</p> 
+ <!-- TemplateEndEditable -->
+ </footer>
+ 
+ <!-- <script>alert("it worked");</script> -->
+ <script src="/js/script.js"></script>
+ 
+ <!-- TemplateBeginEditable name="script" -->
+
+ <!-- TemplateEndEditable -->
+</body>
+</html>
