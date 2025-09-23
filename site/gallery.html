@@ -1,6 +1,8 @@
 <!doctype html>
-<html><!-- InstanceBegin template="/Templates/page.dwt" codeOutsideHTMLIsLocked="false" -->
+<html>
+<!-- InstanceBegin template="/Templates/page.dwt" codeOutsideHTMLIsLocked="true" -->
 <head>
+<!-- TemplateInfo codeOutsideHTMLIsLocked="true" -->
 <meta charset="utf-8">
 <link rel="icon" href="/favicon.png">
 <!-- InstanceBeginEditable name="doctitle" -->
@@ -17,10 +19,12 @@
     grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
     gap: 1rem;
     margin-top: 2rem;
+    margin-left: -15px;
 }
 .gallery-item {
     border: 1px solid #ddd;
     border-radius: 8px;
+    padding: 10px 5px;
     overflow: hidden;
     transition: transform 0.3s ease;
 }
@@ -43,16 +47,12 @@
     color: #666;
     font-size: 14px;
 }
-.gallery-caption {
-    padding: 1rem;
-}
 </style>
 <!-- InstanceEndEditable -->
 </head>
 
 <body>
- <!-- template menu [UPDATED] -->
- <div>
+ <div class="nav">
   <nav>
    <ul>
     <li><a href="/index.html">Home</a></li>
@@ -60,6 +60,13 @@
     <li><a href="/about.html">About</a></li>
     <li><a href="/blog.html">Blog</a></li>
     <li><a href="/gallery.html">Gallery</a></li>
+    <li class="dropdown">
+     <a href="#" class="dropbtn">Services ▼</a>
+     <div class="dropdown-content">
+      <a href="/webDevelopment.html">Web Development</a>
+      <a href="/graphicDesign.html">Graphic Design</a>
+     </div>
+    </li>
     <li><a href="/contact.html">Contact</a></li>
    </ul>
   </nav>
@@ -134,6 +141,36 @@
      <p>Custom Dreamweaver template protection system for VS Code development.</p>
     </div>
    </div>
+
+   <div class="gallery-item">
+    <div class="gallery-placeholder">
+     📸 Project Image
+    </div>
+    <div class="gallery-caption">
+     <h3>Copywriting</h3>
+     <p>Customized copy for your project and project goals.</p>
+    </div>
+   </div>
+
+   <div class="gallery-item">
+    <div class="gallery-placeholder">
+     📸 Project Image
+    </div>
+    <div class="gallery-caption">
+     <h3>Custom Graphics</h3>
+     <p>Graphics tailored to fit your brand.</p>
+    </div>
+   </div>
+
+   <div class="gallery-item">
+    <div class="gallery-placeholder">
+     📸 Project Image
+    </div>
+    <div class="gallery-caption">
+     <h3>Brand Design</h3>
+     <p>Starting from scratch? No worries. Our team can build your brand from the ground up.</p>
+    </div>
+   </div>
   </div>
  </main>
 <!-- InstanceEndEditable -->
@@ -144,8 +181,8 @@
  <!-- InstanceEndEditable -->
  </footer>
  
- <!-- <script>alert("it worked");</script> -->
- <script src="/js/script.js"></script>
+ <!-- <script>alert("it worked");</script>  -->
+ <script src="/js/script.js"></script> 
  
  <!-- InstanceBeginEditable name="script" -->
 <script>
@@ -168,4 +205,4 @@ document.addEventListener('DOMContentLoaded', function() {
 </script>
  <!-- InstanceEndEditable -->
 </body>
-</html>
+<!-- InstanceEnd --></html>

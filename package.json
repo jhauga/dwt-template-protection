@@ -42,7 +42,7 @@
             },
             {
                 "command": "dreamweaverTemplate.syncTemplate",
-                "title": "Sync Template to Instances",
+                "title": "Update HTML Based on Template",
                 "category": "Dreamweaver Template"
             },
             {
@@ -53,6 +53,11 @@
             {
                 "command": "dreamweaverTemplate.findInstances",
                 "title": "Find Template Instances",
+                "category": "Dreamweaver Template"
+            },
+            {
+                "command": "dreamweaverTemplate.restoreBackup",
+                "title": "Restore Last HTML Backup",
                 "category": "Dreamweaver Template"
             }
         ],
@@ -77,6 +82,10 @@
                     "when": "resourceExtname == .dwt",
                     "command": "dreamweaverTemplate.findInstances",
                     "group": "dreamweaver"
+                },
+                {
+                    "command": "dreamweaverTemplate.restoreBackup",
+                    "group": "dreamweaver"
                 }
             ],
             "commandPalette": [
@@ -98,6 +107,9 @@
                 {
                     "command": "dreamweaverTemplate.findInstances",
                     "when": "resourceExtname == .dwt"
+                },
+                {
+                    "command": "dreamweaverTemplate.restoreBackup"
                 }
             ]
         },
