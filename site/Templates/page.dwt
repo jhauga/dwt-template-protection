@@ -1,7 +1,7 @@
 <!doctype html>
 <html>
 <head>
-<!-- TemplateInfo codeOutsideHTMLIsLocked="true" -->	
+<!-- TemplateInfo codeOutsideHTMLIsLocked="true" -->
 <meta charset="utf-8">
 <link rel="icon" href="/favicon.png">
 <!-- TemplateBeginEditable name="doctitle" -->
@@ -53,8 +53,8 @@
  <!-- TemplateEndEditable -->
  </footer>
  
- <!-- <script>alert("it worked");</script> -->
- <script src="/js/script.js"></script>
+ <!-- <script>alert("it worked");</script>  -->
+ <script src="/js/script.js"></script> 
  
  <!-- TemplateBeginEditable name="script" -->
 
