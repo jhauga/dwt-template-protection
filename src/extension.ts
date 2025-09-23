@@ -10,7 +10,7 @@ let isTemplateSyncEnabled = true;
 let templateWatcher: vscode.FileSystemWatcher | undefined;
 
 // Store last backup information for restore functionality
-let lastBackupInfo: { backupDir: string; templateName: string; instances: vscode.Uri[] } | undefined;
+let lastBackupInfo: { backupDir: string; templateName: string; instances: vscode.Uri[]; siteRoot: string } | undefined;
 
 // Character preservation system for delete/backspace protection
 interface DocumentSnapshot {
@@ -308,7 +308,7 @@ export function activate(context: vscode.ExtensionContext) {
         return true;
     }
 
-    // Create backup of HTML files before updating
+    // Create backup of files (html/php/dwt) before updating, preserving folder structure
     async function createHtmlBackups(instances: vscode.Uri[], templatePath: string): Promise<string> {
         try {
             // Get template name without extension for folder naming
@@ -357,28 +357,30 @@ export function activate(context: vscode.ExtensionContext) {
             // Create new backup 1 directory
             fs.mkdirSync(backup1Dir, { recursive: true });
             
-            console.log(`Backing up ${instances.length} HTML files to: ${backup1Dir}`);
+            console.log(`Backing up ${instances.length} file(s) (html/php/dwt) to: ${backup1Dir}`);
             
-            // Backup each HTML file to the new backup 1 directory
+            // Backup each file to the new backup 1 directory, preserving relative path
             for (const instanceUri of instances) {
                 try {
-                    const fileName = path.basename(instanceUri.fsPath);
-                    const backupPath = path.join(backup1Dir, fileName);
+                    const relPath = path.relative(siteRoot, instanceUri.fsPath);
+                    const backupPath = path.join(backup1Dir, relPath);
+                    // ensure directory exists
+                    fs.mkdirSync(path.dirname(backupPath), { recursive: true });
                     
                     // Copy file to backup location
                     const content = fs.readFileSync(instanceUri.fsPath, 'utf8');
                     fs.writeFileSync(backupPath, content, 'utf8');
                     
-                    console.log(`Backed up: ${fileName}`);
+                    console.log(`Backed up: ${relPath}`);
                 } catch (error) {
                     console.error(`Error backing up ${instanceUri.fsPath}:`, error);
                 }
             }
             
-            console.log(`All HTML files backed up to: ${backup1Dir}`);
+            console.log(`All files backed up to: ${backup1Dir}`);
             
             // Store backup info for restore functionality
-            lastBackupInfo = { backupDir: backup1Dir, templateName, instances };
+            lastBackupInfo = { backupDir: backup1Dir, templateName, instances, siteRoot };
             
             return backup1Dir;
             
@@ -400,37 +402,48 @@ export function activate(context: vscode.ExtensionContext) {
             cancellable: false
         }, async (progress) => {
             try {
-                const { backupDir, templateName, instances } = lastBackupInfo!;
+                const { backupDir, templateName, siteRoot } = lastBackupInfo!;
                 if (!fs.existsSync(backupDir)) {
                     vscode.window.showErrorMessage(`Backup directory not found: ${backupDir}`);
                     return;
                 }
                 progress.report({ message: `Found backup for template ${templateName}`, increment: 5 });
+
+                // Collect all files in backupDir recursively
+                const listFilesRecursively = (dir: string): string[] => {
+                    const out: string[] = [];
+                    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+                        const full = path.join(dir, entry.name);
+                        if (entry.isDirectory()) {
+                            out.push(...listFilesRecursively(full));
+                        } else {
+                            out.push(full);
+                        }
+                    }
+                    return out;
+                };
+
+                const files = listFilesRecursively(backupDir);
                 let restoredCount = 0;
                 let failedCount = 0;
-                const total = instances.length || 1;
-                for (let i = 0; i < instances.length; i++) {
-                    const instanceUri = instances[i];
+                const total = files.length || 1;
+                for (let i = 0; i < files.length; i++) {
+                    const backupFile = files[i];
+                    const rel = path.relative(backupDir, backupFile);
+                    const target = path.join(siteRoot, rel);
                     try {
-                        const fileName = path.basename(instanceUri.fsPath);
-                        const backupPath = path.join(backupDir, fileName);
-                        if (fs.existsSync(backupPath)) {
-                            const backupContent = fs.readFileSync(backupPath, 'utf8');
-                            fs.writeFileSync(instanceUri.fsPath, backupContent, 'utf8');
-                            restoredCount++;
-                        } else {
-                            failedCount++;
-                        }
-                    } catch {
+                        const content = fs.readFileSync(backupFile, 'utf8');
+                        fs.mkdirSync(path.dirname(target), { recursive: true });
+                        fs.writeFileSync(target, content, 'utf8');
+                        restoredCount++;
+                    } catch (e) {
+                        console.error(`Failed restore for ${rel}:`, e);
                         failedCount++;
                     }
                     progress.report({ increment: 80 / total, message: `Restored ${i + 1}/${total}` });
                 }
-                // Refresh editors
-                for (const instanceUri of instances) {
-                    try { await vscode.workspace.openTextDocument(instanceUri); } catch { /* ignore */ }
-                }
-                const message = `Restored ${restoredCount} HTML file(s) from template "${templateName}" backup${failedCount ? ` (${failedCount} failed)` : ''}`;
+
+                const message = `Restored ${restoredCount} file(s) from template "${templateName}" backup${failedCount ? ` (${failedCount} failed)` : ''}`;
                 progress.report({ increment: 15, message: 'Done' });
                 vscode.window.showInformationMessage(message);
             } catch (error) {
@@ -457,18 +470,19 @@ export function activate(context: vscode.ExtensionContext) {
                 
                 try {
                     const content = fs.readFileSync(templateFile.fsPath, 'utf8');
-                    
-                    // Check if this template references our template
-                    const instanceBeginRegex = /<!--\s*InstanceBegin\s+template="([^"]+)"/;
-                    const match = content.match(instanceBeginRegex);
+                    const headSlice = content.slice(0, 600);
+                    // Check if this template references our template (only in top portion)
+                    const instanceBeginRegex = /<!--\s*InstanceBegin\s+template="([^"]+)"/i;
+                    const match = headSlice.match(instanceBeginRegex);
                     
                     if (match) {
                         const referencedTemplate = match[1];
-                        // Check if it references our template (handle both absolute and relative paths)
-                        if (referencedTemplate.includes(templateName) || 
-                            path.basename(referencedTemplate) === templateName) {
+                        const referencedTemplateName = path.basename(referencedTemplate);
+                        if (referencedTemplateName === templateName) {
                             childTemplates.push(templateFile);
-                            console.log(`Found child template: ${templateFile.fsPath} references ${templateName}`);
+                            console.log(`Found child template (exact): ${templateFile.fsPath} references ${templateName}`);
+                        } else {
+                            console.log(`Ignoring template ${templateFile.fsPath} referencing different template ${referencedTemplateName}`);
                         }
                     }
                 } catch (error) {
@@ -522,19 +536,19 @@ export function activate(context: vscode.ExtensionContext) {
             console.log(`DEBUG: Site root relative to workspace: "${siteRootRelative}"`);
             
             if (siteRootRelative === '') {
-                searchPattern = '**/*.html';
+                searchPattern = '**/*.{html,php}';
             } else {
-                searchPattern = `${siteRootRelative}/**/*.html`;
+                searchPattern = `${siteRootRelative}/**/*.{html,php}`;
             }
             
-            console.log(`DEBUG: Searching for HTML files with pattern: ${searchPattern}`);
+            console.log(`DEBUG: Searching for HTML/PHP files with pattern: ${searchPattern}`);
             
             // Find all HTML files within the site root and its subdirectories
             // Exclude node_modules and backup directories
             const htmlFiles = await vscode.workspace.findFiles(searchPattern, '{**/node_modules/**,**/.dwt-template-protection-backups/**}');
             
-            console.log(`DEBUG: Found ${htmlFiles.length} HTML files to check (excluding .dwt-template-protection-backups)`);
-            htmlFiles.forEach(file => console.log(`DEBUG: HTML file: ${file.fsPath}`));
+            console.log(`DEBUG: Found ${htmlFiles.length} HTML/PHP files to check (excluding backups)`);
+            htmlFiles.forEach(file => console.log(`DEBUG: Candidate file: ${file.fsPath}`));
             
             for (const file of htmlFiles) {
                 try {
@@ -545,10 +559,10 @@ export function activate(context: vscode.ExtensionContext) {
                     }
                     
                     const content = fs.readFileSync(file.fsPath, 'utf8');
-                    
-                    // Check if this HTML file was created from our template
-                    const instanceBeginRegex = /<!--\s*InstanceBegin\s+template="([^"]+)"/;
-                    const match = content.match(instanceBeginRegex);
+                    // Limit search to first 600 chars (top lines) to avoid false positives deep in body
+                    const headSlice = content.slice(0, 600);
+                    const instanceBeginRegex = /<!--\s*InstanceBegin\s+template="([^"]+)"/i;
+                    const match = headSlice.match(instanceBeginRegex);
                     
                     if (match) {
                         const referencedTemplate = match[1];
@@ -830,6 +844,55 @@ export function activate(context: vscode.ExtensionContext) {
             // Idempotency cleanup
             rebuilt = rebuilt.replace(/\n{4,}/g, '\n\n');
 
+            // Preserve code outside <html> when codeOutsideHTMLIsLocked="false"
+            try {
+                const outsideLockFalse = /codeOutsideHTMLIsLocked\s*=\s*"false"/i.test(instanceBegin);
+                if (outsideLockFalse) {
+                    const instHtmlOpen = (() => { const m = /<html[^>]*>/i.exec(instanceContent); return m ? { idx: m.index, len: m[0].length } : null; })();
+                    const instHtmlClose = (() => { let m: RegExpExecArray | null; let last: RegExpExecArray | null = null; const r = /<\/html>/ig; while ((m = r.exec(instanceContent)) !== null) last = m; return last ? { idx: last.index, len: last[0].length } : null; })();
+                    const rebHtmlOpen = (() => { const m = /<html[^>]*>/i.exec(rebuilt); return m ? { idx: m.index, len: m[0].length } : null; })();
+                    const rebHtmlClose = (() => { let m: RegExpExecArray | null; let last: RegExpExecArray | null = null; const r = /<\/html>/ig; while ((m = r.exec(rebuilt)) !== null) last = m; return last ? { idx: last.index, len: last[0].length } : null; })();
+
+                    if (instHtmlOpen && rebHtmlOpen) {
+                        const instancePrefix = instanceContent.slice(0, instHtmlOpen.idx);
+                        // Replace prefix before <html> in rebuilt with instance prefix
+                        rebuilt = instancePrefix + rebuilt.slice(rebHtmlOpen.idx);
+                        console.log('[DW-MERGE] Preserved code before <html> due to codeOutsideHTMLIsLocked="false"');
+                    }
+                    // Preserve content after InstanceEnd; if absent, fallback to after </html>
+                    const instEndExecAll = (() => { let m: RegExpExecArray | null; let last: RegExpExecArray | null = null; const r = /<!--\s*InstanceEnd\s*-->/ig; while ((m = r.exec(instanceContent)) !== null) last = m; return last; })();
+                    if (instEndExecAll) {
+                        const tail = instanceContent.slice(instEndExecAll.index + instEndExecAll[0].length);
+                        const afterHtml = tail.replace(/^[\s\r\n]*<\/html>/i, '');
+                        if (afterHtml.length > 0) {
+                            rebuilt = rebuilt + afterHtml;
+                            console.log('[DW-MERGE] Preserved content after InstanceEnd/</html>');
+                        }
+                    } else if (instHtmlClose) {
+                        const afterHtmlOnly = instanceContent.slice(instHtmlClose.idx + instHtmlClose.len);
+                        if (afterHtmlOnly.length > 0) {
+                            rebuilt = rebuilt + afterHtmlOnly;
+                            console.log('[DW-MERGE] Preserved content after </html> (no InstanceEnd found)');
+                        }
+                    }
+                }
+            } catch (e) {
+                console.warn('[DW-MERGE] Failed to preserve outside-HTML code:', e);
+            }
+
+            // Final enforcement: ensure InstanceEnd and </html> exist
+            const hasInstEnd = /<!--\s*InstanceEnd\s*-->/i.test(rebuilt);
+            const hasHtmlClose = /<\/html>/i.test(rebuilt);
+            if (!hasInstEnd && hasHtmlClose) {
+                rebuilt = rebuilt.replace(/(<\/html>)/i, '<!-- InstanceEnd -->$1');
+            } else if (!hasInstEnd && !hasHtmlClose) {
+                rebuilt += '\n<!-- InstanceEnd --></html>';
+            } else if (hasInstEnd && !hasHtmlClose) {
+                rebuilt += '\n</html>';
+            }
+            // Normalize order: ensure InstanceEnd precedes </html>
+            rebuilt = rebuilt.replace(/<\/html>\s*<!--\s*InstanceEnd\s*-->/ig, '<!-- InstanceEnd --></html>');
+
             // Safety guard: verify all preserved regions still present
             let missing: string[] = [];
             for (const [rName, rContent] of preservedRegions.entries()) {
@@ -903,7 +966,7 @@ export function activate(context: vscode.ExtensionContext) {
                     return;
                 }
                 
-                progress.report({ increment: 20, message: `Found ${instances.length} HTML instances and ${childTemplates.length} child templates` });
+                progress.report({ increment: 20, message: `Found ${instances.length} HTML/PHP instances and ${childTemplates.length} child templates` });
                 
                 // If no instances found, show message
                 if (instances.length === 0) {
@@ -922,10 +985,7 @@ export function activate(context: vscode.ExtensionContext) {
                     
                     vscode.window.showInformationMessage(message);
                     
-                    // Update child templates even if no HTML instances
-                    if (childTemplates.length === 0) {
-                        return; // No work to do
-                    }
+                    // We may still proceed if child templates exist
                 }
 
                 // Temporarily disable protection during update
@@ -938,6 +998,26 @@ export function activate(context: vscode.ExtensionContext) {
                 if (token.isCancellationRequested) {
                     isProtectionEnabled = originalProtectionState;
                     return;
+                }
+
+                // Create backups (instances + child templates), preserving structure
+                const toBackupMap = new Map<string, vscode.Uri>();
+                for (const u of instances) toBackupMap.set(u.fsPath, u);
+                for (const u of childTemplates) toBackupMap.set(u.fsPath, u);
+                const toBackup = Array.from(toBackupMap.values());
+                if (toBackup.length > 0) {
+                    progress.report({ increment: 10, message: `Creating backups of ${toBackup.length} file(s)...` });
+                    try {
+                        const backupDir = await createHtmlBackups(toBackup, templateUri.fsPath);
+                        vscode.window.showInformationMessage(
+                            `Backed up ${toBackup.length} file(s) to: ${path.basename(backupDir)}`
+                        );
+                    } catch (error) {
+                        console.error('Backup creation failed:', error);
+                        vscode.window.showErrorMessage(
+                            `Failed to create backups: ${error instanceof Error ? error.message : String(error)}. Proceeding without backup.`
+                        );
+                    }
                 }
                 
                 // Step 3: Update child templates (but NOT their instances automatically)
@@ -965,25 +1045,9 @@ export function activate(context: vscode.ExtensionContext) {
                     }
                 }
                 
-                // Step 4: Update HTML instances of THIS template only
+                // Step 4: Update HTML/PHP instances of THIS template only
                 if (instances.length > 0) {
-                    console.log(`Found ${instances.length} HTML instances to update`);
-                    progress.report({ increment: 10, message: `Creating backups of ${instances.length} HTML files...` });
-
-                    // Create backups of HTML files before updating
-                    console.log('Creating backups of HTML files...');
-                    let backupDir: string;
-                    try {
-                        backupDir = await createHtmlBackups(instances, templateUri.fsPath);
-                        vscode.window.showInformationMessage(
-                            `HTML files backed up to: ${path.basename(backupDir)}`
-                        );
-                    } catch (error) {
-                        console.error('Backup creation failed:', error);
-                        vscode.window.showErrorMessage(
-                            `Failed to create backups: ${error instanceof Error ? error.message : String(error)}. Proceeding without backup.`
-                        );
-                    }
+                    console.log(`Found ${instances.length} instances to update`);
 
                 // Check for cancellation
                 if (token.isCancellationRequested) {
@@ -991,7 +1055,7 @@ export function activate(context: vscode.ExtensionContext) {
                     return;
                 }
 
-                progress.report({ increment: 10, message: "Preparing HTML files for update..." });
+                progress.report({ increment: 10, message: "Preparing instance files for update..." });
 
                 // Close all open editors for instance files to avoid conflicts
                 console.log('Closing open editors for instance files...');
@@ -1052,8 +1116,8 @@ export function activate(context: vscode.ExtensionContext) {
                     }
                     
                     // Update HTML files
-                    console.log('Starting HTML file updates...');
-                    progress.report({ increment: 10, message: `Updating ${instances.length} HTML files...` });
+                    console.log('Starting instance file updates...');
+                    progress.report({ increment: 10, message: `Updating ${instances.length} file(s)...` });
                     
                     const updatePromises = instances.map(async (instanceUri: vscode.Uri, index: number) => {
                         // Check for cancellation before each update
@@ -1062,7 +1126,7 @@ export function activate(context: vscode.ExtensionContext) {
                         }
                         
                         const result = await updateHtmlLikeDreamweaver(instanceUri, templateUri.fsPath);
-                        progress.report({ increment: 25 / instances.length, message: `Preserved content in ${index + 1}/${instances.length} HTML files` });
+                        progress.report({ increment: 25 / instances.length, message: `Preserved content in ${index + 1}/${instances.length}` });
                         return result;
                     });
                     
