@@ -294,6 +294,20 @@ export function activate(context: vscode.ExtensionContext) {
         editor.setDecorations(editableDecorationType, config.get('highlightEditableRegions', true) ? editableRanges : []);
     }
 
+    // Workspace / context validation helper
+    function ensureWorkspaceContext(templateUri?: vscode.Uri): boolean {
+        const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+        if (!workspaceFolder) {
+            vscode.window.showErrorMessage('No workspace folder open. Open the site root folder to use Dreamweaver template features.');
+            return false;
+        }
+        if (templateUri && !templateUri.fsPath.toLowerCase().endsWith('.dwt')) {
+            vscode.window.showWarningMessage('Active file is not a .dwt template. Open a .dwt file for this command.');
+            return false;
+        }
+        return true;
+    }
+
     // Create backup of HTML files before updating
     async function createHtmlBackups(instances: vscode.Uri[], templatePath: string): Promise<string> {
         try {
@@ -380,56 +394,50 @@ export function activate(context: vscode.ExtensionContext) {
             vscode.window.showErrorMessage('No backup information found. Cannot restore files.');
             return;
         }
-
-        try {
-            const { backupDir, templateName, instances } = lastBackupInfo;
-            
-            if (!fs.existsSync(backupDir)) {
-                vscode.window.showErrorMessage(`Backup directory not found: ${backupDir}`);
-                return;
-            }
-
-            let restoredCount = 0;
-            let failedCount = 0;
-
-            console.log(`Restoring ${instances.length} HTML files from template "${templateName}" backup`);
-
-            for (const instanceUri of instances) {
-                try {
-                    const fileName = path.basename(instanceUri.fsPath);
-                    const backupPath = path.join(backupDir, fileName);
-                    
-                    if (fs.existsSync(backupPath)) {
-                        const backupContent = fs.readFileSync(backupPath, 'utf8');
-                        fs.writeFileSync(instanceUri.fsPath, backupContent, 'utf8');
-                        restoredCount++;
-                        console.log(`Restored: ${fileName}`);
-                    } else {
-                        console.warn(`Backup file not found: ${backupPath}`);
+        await vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            title: 'Restoring HTML from backup',
+            cancellable: false
+        }, async (progress) => {
+            try {
+                const { backupDir, templateName, instances } = lastBackupInfo!;
+                if (!fs.existsSync(backupDir)) {
+                    vscode.window.showErrorMessage(`Backup directory not found: ${backupDir}`);
+                    return;
+                }
+                progress.report({ message: `Found backup for template ${templateName}`, increment: 5 });
+                let restoredCount = 0;
+                let failedCount = 0;
+                const total = instances.length || 1;
+                for (let i = 0; i < instances.length; i++) {
+                    const instanceUri = instances[i];
+                    try {
+                        const fileName = path.basename(instanceUri.fsPath);
+                        const backupPath = path.join(backupDir, fileName);
+                        if (fs.existsSync(backupPath)) {
+                            const backupContent = fs.readFileSync(backupPath, 'utf8');
+                            fs.writeFileSync(instanceUri.fsPath, backupContent, 'utf8');
+                            restoredCount++;
+                        } else {
+                            failedCount++;
+                        }
+                    } catch {
                         failedCount++;
                     }
-                } catch (error) {
-                    console.error(`Error restoring ${instanceUri.fsPath}:`, error);
-                    failedCount++;
+                    progress.report({ increment: 80 / total, message: `Restored ${i + 1}/${total}` });
                 }
-            }
-
-            const message = `Restored ${restoredCount} HTML file(s) from template "${templateName}" backup${failedCount > 0 ? ` (${failedCount} failed)` : ''}`;
-            vscode.window.showInformationMessage(message);
-
-            // Refresh any open editors
-            for (const instanceUri of instances) {
-                try {
-                    await vscode.workspace.openTextDocument(instanceUri);
-                } catch (error) {
-                    console.log(`Could not refresh editor for ${instanceUri.fsPath}: ${error}`);
+                // Refresh editors
+                for (const instanceUri of instances) {
+                    try { await vscode.workspace.openTextDocument(instanceUri); } catch { /* ignore */ }
                 }
+                const message = `Restored ${restoredCount} HTML file(s) from template "${templateName}" backup${failedCount ? ` (${failedCount} failed)` : ''}`;
+                progress.report({ increment: 15, message: 'Done' });
+                vscode.window.showInformationMessage(message);
+            } catch (error) {
+                console.error('Error restoring HTML from backup:', error);
+                vscode.window.showErrorMessage(`Failed to restore HTML files: ${error instanceof Error ? error.message : String(error)}`);
             }
-
-        } catch (error) {
-            console.error('Error restoring HTML from backup:', error);
-            vscode.window.showErrorMessage(`Failed to restore HTML files: ${error instanceof Error ? error.message : String(error)}`);
-        }
+        });
     }
 
     // Find all templates that use a given template (template hierarchy)
@@ -723,101 +731,134 @@ export function activate(context: vscode.ExtensionContext) {
 
             const rawInstance = fs.readFileSync(instancePath, 'utf8');
             const rawTemplate = fs.readFileSync(templatePath, 'utf8');
-
-            // Normalize line endings to avoid drifting diffs
             const instanceContent = rawInstance.replace(/\r\n?/g, '\n');
             const templateContent = rawTemplate.replace(/\r\n?/g, '\n');
 
-            // 1. Capture existing editable regions (InstanceBeginEditable only) from the instance
-            const editableRegionRegex = /<!--\s*InstanceBeginEditable\s+name="([^"]+)"\s*-->([\s\S]*?)<!--\s*InstanceEndEditable\s*-->/g;
+            // Preserve existing instance editable regions
             const preservedRegions = new Map<string, string>();
-            let erMatch: RegExpExecArray | null;
-            while ((erMatch = editableRegionRegex.exec(instanceContent)) !== null) {
-                preservedRegions.set(erMatch[1], erMatch[2]);
+            const instanceEditablePattern = /<!--\s*InstanceBeginEditable\s+name="([^"]+)"\s*-->([\s\S]*?)<!--\s*InstanceEndEditable\s*-->/g;
+            let m: RegExpExecArray | null;
+            while ((m = instanceEditablePattern.exec(instanceContent)) !== null) {
+                preservedRegions.set(m[1], m[2]);
             }
-            console.log(`[DW-MERGE] Preserved regions: ${Array.from(preservedRegions.keys()).join(', ') || '(none)'}`);
+            console.log(`[DW-MERGE] Preserved regions (${preservedRegions.size}): ${Array.from(preservedRegions.keys()).join(', ') || '(none)'}`);
 
-            // 2. Determine template editable regions (can be TemplateBeginEditable OR InstanceBeginEditable if template already converted)
-            const templateEditableRegex = /<!--\s*(TemplateBeginEditable|InstanceBeginEditable)\s+name="([^"]+)"\s*-->([\s\S]*?)<!--\s*(TemplateEndEditable|InstanceEndEditable)\s*-->/g;
-            interface RegionBlock { name: string; defaultContent: string; }
-            const templateRegions: RegionBlock[] = [];
-            let trMatch: RegExpExecArray | null;
-            while ((trMatch = templateEditableRegex.exec(templateContent)) !== null) {
-                templateRegions.push({ name: trMatch[2], defaultContent: trMatch[3] });
+            // Robust region parser for template (handles single-line regions):
+            interface ParsedRegion { name: string; begin: number; end: number; defaultContent: string; full: string; }
+            const regionPattern = /<!--\s*(TemplateBeginEditable|InstanceBeginEditable)\s+name="([^"]+)"\s*-->([\s\S]*?)<!--\s*(TemplateEndEditable|InstanceEndEditable)\s*-->/g;
+            const parsedRegions: ParsedRegion[] = [];
+            let rp: RegExpExecArray | null;
+            while ((rp = regionPattern.exec(templateContent)) !== null) {
+                parsedRegions.push({
+                    name: rp[2],
+                    begin: rp.index,
+                    end: rp.index + rp[0].length,
+                    defaultContent: rp[3],
+                    full: rp[0]
+                });
             }
-            console.log(`[DW-MERGE] Template regions found: ${templateRegions.map(r => r.name).join(', ') || '(none)'}`);
+            console.log(`[DW-MERGE] Template regions parsed: ${parsedRegions.map(r=>r.name).join(', ') || '(none)'}`);
 
-            // 3. Extract outer shell (everything outside editable regions) from template
-            // We'll split template into an ordered sequence of static segments and region placeholders
-            type Segment = { type: 'static'; text: string } | { type: 'region'; name: string };
+            // Build segments (static/region)
+            type Segment = { kind: 'static'; text: string } | { kind: 'region'; region: ParsedRegion };
             const segments: Segment[] = [];
-            let lastIndex = 0;
-            templateEditableRegex.lastIndex = 0; // reset to iterate again
-            while ((trMatch = templateEditableRegex.exec(templateContent)) !== null) {
-                const full = trMatch[0];
-                const start = trMatch.index;
-                if (start > lastIndex) {
-                    segments.push({ type: 'static', text: templateContent.substring(lastIndex, start) });
+            let cursor = 0;
+            for (const r of parsedRegions) {
+                if (r.begin > cursor) {
+                    segments.push({ kind: 'static', text: templateContent.slice(cursor, r.begin) });
                 }
-                segments.push({ type: 'region', name: trMatch[2] });
-                lastIndex = start + full.length;
+                segments.push({ kind: 'region', region: r });
+                cursor = r.end;
             }
-            if (lastIndex < templateContent.length) {
-                segments.push({ type: 'static', text: templateContent.substring(lastIndex) });
+            if (cursor < templateContent.length) {
+                segments.push({ kind: 'static', text: templateContent.slice(cursor) });
             }
-            console.log(`[DW-MERGE] Segments: static=${segments.filter(s=>s.type==='static').length} region=${segments.filter(s=>s.type==='region').length}`);
+            console.log(`[DW-MERGE] Segments -> static:${segments.filter(s=>s.kind==='static').length} region:${segments.filter(s=>s.kind==='region').length}`);
 
-            // 4. Get / reconstruct preserved InstanceBegin comment from instance OR fallback to template reference
-            const instanceBeginRegex = /<!--\s*InstanceBegin\s+template="([^"]+)"[^>]*-->/i;
-            let instanceBegin = instanceContent.match(instanceBeginRegex)?.[0];
-            if (!instanceBegin) {
-                const templateName = path.basename(templatePath);
-                instanceBegin = `<!-- InstanceBegin template="/Templates/${templateName}" codeOutsideHTMLIsLocked="true" -->`;
-            }
+            // InstanceBegin (preserve existing reference)
+            const instanceBeginMatch = instanceContent.match(/<!--\s*InstanceBegin\s+template="([^"]+)"[^>]*-->/i);
+            const instanceBegin = instanceBeginMatch ? instanceBeginMatch[0] : `<!-- InstanceBegin template="/Templates/${path.basename(templatePath)}" codeOutsideHTMLIsLocked="true" -->`;
 
-            // 5. Ensure only one InstanceBegin in final output; remove any from static segments
-            for (let i = 0; i < segments.length; i++) {
-                if (segments[i].type === 'static') {
-                    (segments[i] as any).text = (segments[i] as any).text.replace(/<!--\s*InstanceBegin[^>]*-->\s*/gi, '');
+            // Remove stray InstanceBegin occurrences in static segments to avoid duplication
+            for (const s of segments) {
+                if (s.kind === 'static') {
+                    s.text = s.text.replace(/<!--\s*InstanceBegin[^>]*-->\s*/gi, '');
                 }
             }
 
-            // 6. Build updated content
+            // Rebuild
             let rebuilt = '';
             let injectedInstanceBegin = false;
-            for (const seg of segments) {
-                if (seg.type === 'static') {
-                    // Insert InstanceBegin right after <html...>
+            const originalStaticBytes = segments.filter(s=>s.kind==='static').reduce((a,b)=>a+ (b as any).text.length,0);
+            for (const s of segments) {
+                if (s.kind === 'static') {
                     if (!injectedInstanceBegin) {
                         const htmlTagRegex = /<html[^>]*>/i;
-                        if (htmlTagRegex.test(seg.text)) {
-                            rebuilt += seg.text.replace(htmlTagRegex, m => `${m}\n${instanceBegin}`);
+                        if (htmlTagRegex.test(s.text)) {
+                            rebuilt += s.text.replace(htmlTagRegex, match => `${match}\n${instanceBegin}`);
                             injectedInstanceBegin = true;
                             continue;
                         }
                     }
-                    rebuilt += seg.text;
+                    rebuilt += s.text;
                 } else {
-                    // region
-                    const preserved = preservedRegions.get(seg.name);
-                    const regionDefault = templateRegions.find(r => r.name === seg.name)?.defaultContent || '';
-                    const contentToUse = preserved !== undefined ? preserved : regionDefault;
+                    const name = s.region.name;
+                    const preserved = preservedRegions.get(name);
+                    const defaultContent = s.region.defaultContent;
+                    const contentToUse = preserved !== undefined ? preserved : defaultContent;
                     if (preserved === undefined) {
-                        console.log(`[DW-MERGE] Region "${seg.name}" new to instance (using template default)`);
+                        console.log(`[DW-MERGE] Region "${name}" new (using template default)`);
                     }
-                    rebuilt += `<!-- InstanceBeginEditable name="${seg.name}" -->${contentToUse}<!-- InstanceEndEditable -->`;
+                    // Preserve surrounding whitespace style: check if original full was single-line
+                    const singleLine = !/\n/.test(s.region.full.trim());
+                    const openTag = `<!-- InstanceBeginEditable name="${name}" -->`;
+                    const closeTag = `<!-- InstanceEndEditable -->`;
+                    if (singleLine) {
+                        rebuilt += `${openTag}${contentToUse}${closeTag}`;
+                    } else {
+                        // Ensure content retains leading/trailing newlines as in preserved or default
+                        let c = contentToUse;
+                        rebuilt += `${openTag}${c}${closeTag}`;
+                    }
                 }
             }
 
-            // 7. Append missing InstanceEnd before </html>
+            // Append InstanceEnd
             rebuilt = rebuilt.replace(/<!--\s*InstanceEnd\s*-->/gi, '');
             rebuilt = rebuilt.replace(/(<\/html>)/i, '<!-- InstanceEnd -->$1');
 
-            // 8. Idempotency cleanup: collapse duplicate blank lines
-            rebuilt = rebuilt.replace(/\n{3,}/g, '\n\n');
+            // Idempotency cleanup
+            rebuilt = rebuilt.replace(/\n{4,}/g, '\n\n');
 
-            // 9. Write back only if changed
+            // Safety guard: verify all preserved regions still present
+            let missing: string[] = [];
+            for (const [rName, rContent] of preservedRegions.entries()) {
+                if (rContent.trim() && !rebuilt.includes(rContent.trim().slice(0, Math.min(40, rContent.trim().length)))) {
+                    missing.push(rName);
+                }
+            }
+            if (missing.length) {
+                console.error(`[DW-MERGE] Safety abort: missing preserved regions: ${missing.join(', ')}`);
+                vscode.window.showErrorMessage(`Skipped updating ${path.basename(instancePath)} (failed to safely preserve regions: ${missing.join(', ')})`);
+                return false;
+            }
+
             if (rebuilt !== instanceContent) {
+                // Additional guard: ensure we did not accidentally shrink file drastically (>60% reduction)
+                const ratio = rebuilt.length / instanceContent.length;
+                if (instanceContent.length > 500 && ratio < 0.4) {
+                    console.error(`[DW-MERGE] Safety abort: rebuilt size ratio ${ratio.toFixed(2)} too small.`);
+                    vscode.window.showErrorMessage(`Skipped updating ${path.basename(instancePath)} (safety size check failed)`);
+                    return false;
+                }
+                const rebuiltStaticBytes = (()=>{ // recompute static by stripping editable blocks
+                    return rebuilt.replace(/<!--\s*InstanceBeginEditable[\s\S]*?InstanceEndEditable\s*-->/g,'').length;
+                })();
+                if (rebuiltStaticBytes < originalStaticBytes * 0.5) {
+                    console.error(`[DW-MERGE] Safety abort: static content reduced from ${originalStaticBytes} to ${rebuiltStaticBytes}.`);
+                    vscode.window.showErrorMessage(`Skipped updating ${path.basename(instancePath)} (static content shrink)}`);
+                    return false;
+                }
                 fs.writeFileSync(instancePath, rebuilt, 'utf8');
                 console.log(`[DW-MERGE] Wrote updated instance: ${instancePath}`);
             } else {
@@ -1168,8 +1209,12 @@ export function activate(context: vscode.ExtensionContext) {
 
     const syncTemplateCommand = vscode.commands.registerCommand('dreamweaverTemplate.syncTemplate', async () => {
         const editor = vscode.window.activeTextEditor;
-        if (editor && editor.document.fileName.endsWith('.dwt')) {
-            // Show confirmation dialog
+        if (!editor) {
+            vscode.window.showWarningMessage('No active editor. Open a .dwt template file.');
+            return;
+        }
+        if (!ensureWorkspaceContext(editor.document.uri)) return;
+        if (editor.document.fileName.toLowerCase().endsWith('.dwt')) {
             const templateName = path.basename(editor.document.fileName);
             const choice = await vscode.window.showWarningMessage(
                 `Are you sure you want to update HTML based on template "${templateName}"?\n\nThis will update the template structure while preserving all editable content.`,
@@ -1177,7 +1222,6 @@ export function activate(context: vscode.ExtensionContext) {
                 'Yes',
                 'No'
             );
-            
             if (choice === 'Yes') {
                 await updateHtmlBasedOnTemplate(editor.document.uri);
             }
@@ -1192,6 +1236,7 @@ export function activate(context: vscode.ExtensionContext) {
             vscode.window.showErrorMessage('No backup information found. Cannot restore files.');
             return;
         }
+        if (!ensureWorkspaceContext()) return;
         
         // Show confirmation dialog with template name
         const templateName = lastBackupInfo.templateName;
@@ -1217,24 +1262,36 @@ export function activate(context: vscode.ExtensionContext) {
 
     const findInstancesCommand = vscode.commands.registerCommand('dreamweaverTemplate.findInstances', async () => {
         const editor = vscode.window.activeTextEditor;
-        if (editor && editor.document.fileName.endsWith('.dwt')) {
-            const instances = await findTemplateInstances(editor.document.uri.fsPath);
-            
-            if (instances.length > 0) {
-                const instanceNames = instances.map(uri => path.basename(uri.fsPath));
-                vscode.window.showQuickPick(instanceNames, {
-                    placeHolder: `Found ${instances.length} instance(s). Select one to open:`
-                }).then(selectedInstance => {
-                    if (selectedInstance) {
-                        const selectedUri = instances.find(uri => path.basename(uri.fsPath) === selectedInstance);
-                        if (selectedUri) {
-                            vscode.window.showTextDocument(selectedUri);
+        if (!editor) {
+            vscode.window.showWarningMessage('No active editor. Open a .dwt template file.');
+            return;
+        }
+        if (!ensureWorkspaceContext(editor.document.uri)) return;
+        if (editor.document.fileName.toLowerCase().endsWith('.dwt')) {
+            await vscode.window.withProgress({
+                location: vscode.ProgressLocation.Notification,
+                title: 'Finding template instances',
+                cancellable: false
+            }, async (progress) => {
+                progress.report({ message: 'Scanning workspace...' });
+                const instances = await findTemplateInstances(editor.document.uri.fsPath);
+                progress.report({ message: `Found ${instances.length} instance(s)`, increment: 100 });
+                if (instances.length > 0) {
+                    const instanceNames = instances.map(uri => path.basename(uri.fsPath));
+                    vscode.window.showQuickPick(instanceNames, {
+                        placeHolder: `Found ${instances.length} instance(s). Select one to open:`
+                    }).then(selectedInstance => {
+                        if (selectedInstance) {
+                            const selectedUri = instances.find(uri => path.basename(uri.fsPath) === selectedInstance);
+                            if (selectedUri) {
+                                vscode.window.showTextDocument(selectedUri);
+                            }
                         }
-                    }
-                });
-            } else {
-                vscode.window.showInformationMessage('No instances found for this template.');
-            }
+                    });
+                } else {
+                    vscode.window.showInformationMessage('No instances found for this template.');
+                }
+            });
         } else {
             vscode.window.showErrorMessage('This command only works on Dreamweaver template (.dwt) files.');
         }
