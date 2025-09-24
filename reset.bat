@@ -6,6 +6,12 @@ REM Usage: reset [folder]
 set "_parOneRest=%~1"
 set "_checkParOneRest=-%_parOneRest%-"
 
+:: Ensure current directory.
+cd /D "%~dp0"
+
+if NOT EXIST "site.zip" (
+ call save.bat
+)
 call :_startReset 1
 goto:eof
 
