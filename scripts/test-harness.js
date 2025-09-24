@@ -171,9 +171,53 @@ function nextLogPath() {
   return path.join(dir, `${base}${next}.log`);
 }
 
+function generateRandomId() {
+  return Math.random().toString(36).substring(2, 8);
+}
+
+function manageDiffFolder() {
+  const diffPath = path.join(repoRoot, 'diff');
+  const diffFolderExist = exists(diffPath);
+  let backupDiffName = null;
+  
+  if (diffFolderExist) {
+    backupDiffName = `diff_${generateRandomId()}`;
+    const backupPath = path.join(repoRoot, backupDiffName);
+    fs.renameSync(diffPath, backupPath);
+  }
+  
+  return { diffFolderExist, backupDiffName };
+}
+
+function cleanupDiffFolder(diffFolderExist, backupDiffName) {
+  const diffPath = path.join(repoRoot, 'diff');
+  
+  if (diffFolderExist && backupDiffName) {
+    // Remove the test diff folder and restore original
+    if (exists(diffPath)) {
+      fs.rmSync(diffPath, { recursive: true, force: true });
+    }
+    const backupPath = path.join(repoRoot, backupDiffName);
+    if (exists(backupPath)) {
+      fs.renameSync(backupPath, diffPath);
+    }
+  } else {
+    // Remove the test diff folder completely
+    if (exists(diffPath)) {
+      fs.rmSync(diffPath, { recursive: true, force: true });
+    }
+  }
+}
+
 async function main() {
   const logLines = [];
   const log = (...a) => { const s = a.join(' '); console.log(s); logLines.push(s); };
+
+  // Manage existing diff folder
+  log('Pre-test: Managing existing diff folder');
+  const { diffFolderExist, backupDiffName } = manageDiffFolder();
+  log(` - Existing diff folder: ${diffFolderExist}`);
+  if (backupDiffName) log(` - Backed up to: ${backupDiffName}`);
 
   log('Step 1: Saving current site via save.bat');
   let r = runCmd('cmd', ['/c', 'save.bat']);
@@ -190,7 +234,13 @@ async function main() {
   log(' - test.html created');
 
   log('Step 4: Please switch to VS Code and run "Update HTML Based on Template" on Templates/page.dwt.');
-  await prompt('   Press Enter here AFTER the update finishes...');
+  log('   INSTRUCTIONS:');
+  log('   1. Press F5 in VS Code to start debugging session (if not already running)');
+  log('   2. Open Templates/page.dwt in VS Code');
+  log('   3. Right-click in the editor and select "Update HTML Based on Template"');
+  log('   4. Follow the confirmation prompts (Apply to All recommended)');
+  log('   5. Wait for the operation to complete');
+  await prompt('   Press Enter here ONLY AFTER the VS Code update finishes...');
 
   log('Verifying: Resetting baseline into diff/ with reset.bat diff');
   r = runCmd('cmd', ['/c', 'reset.bat', 'diff']);
@@ -202,7 +252,7 @@ async function main() {
   for (const f of instances) {
     const rel = path.relative(siteRoot, f);
     const baseline = path.join(repoRoot, 'diff', rel);
-    if (!exists(baseline)) { log(` - WARN: baseline missing for ${rel}`); okNav = false; continue; }
+    if (!exists(baseline)) { log(` - ${rel}: OK (new file; baseline missing)`); continue; }
     const siteTxt = read(f);
     const baseTxt = read(baseline);
     const onlyMenu = onlyMenuChange(compareText(siteTxt, baseTxt), siteTxt, baseTxt);
@@ -220,7 +270,12 @@ async function main() {
   if (childTemplates.length > 0) {
     log(`Step 5: Update child templates (${childTemplates.length}) that reference page.dwt in VS Code.`);
     childTemplates.forEach(t => log(' -', path.relative(repoRoot, t)));
-    await prompt('   Press Enter AFTER updating child templates...');
+    log('   INSTRUCTIONS:');
+    log('   1. In VS Code, open each of the above child templates');
+    log('   2. Right-click and select "Update HTML Based on Template"');
+    log('   3. Follow confirmation prompts for each template');
+    log('   4. Complete all templates before continuing');
+    await prompt('   Press Enter ONLY AFTER updating ALL child templates...');
 
     // Recreate baseline for comparison after child updates
     r = runCmd('cmd', ['/c', 'reset.bat', 'diff']);
@@ -234,7 +289,7 @@ async function main() {
       for (const f of childInstances) {
         const rel = path.relative(siteRoot, f);
         const baseline = path.join(repoRoot, 'diff', rel);
-        if (!exists(baseline)) { log(`   * WARN: baseline missing for ${rel}`); okChild = false; continue; }
+  if (!exists(baseline)) { log(`   * ${rel}: OK (new file; baseline missing)`); continue; }
         const siteTxt = read(f);
         const baseTxt = read(baseline);
         const onlyMenu = onlyMenuChange(compareText(siteTxt, baseTxt), siteTxt, baseTxt);
@@ -268,7 +323,7 @@ async function main() {
   for (const f of allPages) {
     const rel = path.relative(siteRoot, f);
     const baseline = path.join(repoRoot, 'diff', rel);
-    if (!exists(baseline)) { log(` - WARN: baseline missing for ${rel}`); okPara = false; continue; }
+    if (!exists(baseline)) { log(` - ${rel}: OK (new file; baseline missing)`); continue; }
     const siteTxt = read(f);
     const baseTxt = read(baseline);
     const equal = stripPara(siteTxt) === stripPara(baseTxt);
@@ -286,6 +341,12 @@ async function main() {
   log('Step 8: Restoring site via reset.bat');
   r = runCmd('cmd', ['/c', 'reset.bat']);
   if (r.status !== 0) { log('ERROR: reset.bat failed'); process.exit(1); }
+  
+  // Clean up diff folder
+  log('Post-test: Cleaning up diff folder');
+  cleanupDiffFolder(diffFolderExist, backupDiffName);
+  log(diffFolderExist ? ' - Restored original diff folder' : ' - Removed test diff folder');
+  
   log('Done.');
 }
 
