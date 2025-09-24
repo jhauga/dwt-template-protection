@@ -6,11 +6,12 @@
 <meta charset="utf-8">
 <link rel="icon" href="/favicon.png">
 <!-- InstanceBeginEditable name="doctitle" -->
-<title>Test dwt-template-protection</title>
+<title>Data Table</title>
 <!-- InstanceEndEditable -->
 
 <link rel="stylesheet" href="/css/style.css">
 <!-- InstanceBeginEditable name="head" -->
+<!-- Child template may add head overrides here. -->
 <!-- InstanceEndEditable -->
 </head>
 
@@ -37,28 +38,30 @@
  </div>
  
 <!-- InstanceBeginEditable name="main" -->
- <h1 id="pageTitle"></h1>
+ <h1 id="pageTitle">Data Table</h1>
  <hr>
- <main>
-  <div>
-   <h2></h2>
-   <p></p>
-  </div>
-  
-  <aside>
-   <div>
-    <h3></h3>
-     <ul>
-      <li><a href="#anchor-link"></a>PAGE ANCHOR</li>
-     </ul>
-
-     <h3>Quick Facts</h3>
-     <ul>
-      <li>Page fact.</li>
-     </ul>
-    </div>
-   </aside>
-  
+ <main class="table-page">
+  <section>
+    <table width="95%" border="0" cellspacing="0" cellpadding="0">
+     <caption>Digital Services Overview</caption>
+    <thead>
+    <tr>
+     <th>Service</th>
+     <th>Details</th>
+     <th>Category</th>
+    </tr>
+    </thead>
+    <tbody>
+     <!-- TemplateBeginRepeat name="Table1" -->
+    <tr bgcolor="@@(_index & 1 ? '#FFFFFF' : '#CCCCCC')@@"> 
+     <td><!-- TemplateBeginEditable name="Item" -->Custom Code<!-- TemplateEndEditable --></td>
+     <td><!-- TemplateBeginEditable name="Description" -->Tailored functionality built for your requirements<!-- TemplateEndEditable --></td>
+     <td><!-- TemplateBeginEditable name="Category" -->Development<!-- TemplateEndEditable --></td>
+    </tr>
+     <!-- TemplateEndRepeat -->
+    </tbody>
+   </table>
+  </section>
  </main>
 
 <!-- InstanceEndEditable -->
@@ -69,13 +72,13 @@
  <!-- InstanceEndEditable -->
  </footer>
  
- <!-- <script>alert("apply");</script> -->
+ <script>alert("apply");</script>
  <!-- <script>alert("cancel after first");</script> -->
  <!-- <script>alert("apply to all");</script> -->
  <script src="/js/script.js"></script> 
  
  <!-- InstanceBeginEditable name="script" -->
- <script>alert("did not work - service.dwt");</script>
+ <script>alert("did not work - tables.dwt");</script>
  <!-- InstanceEndEditable -->
 </body>
 <!-- InstanceEnd --></html>

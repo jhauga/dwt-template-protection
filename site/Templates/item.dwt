@@ -11,6 +11,7 @@
 
 <link rel="stylesheet" href="/css/style.css">
 <!-- InstanceBeginEditable name="head" -->
+<!-- TemplateParam name="showHero" type="boolean" value="true" -->
 <!-- InstanceEndEditable -->
 </head>
 
@@ -40,25 +41,52 @@
  <h1 id="pageTitle"></h1>
  <hr>
  <main>
-  <div>
-   <h2></h2>
-   <p></p>
-  </div>
-  
-  <aside>
-   <div>
-    <h3></h3>
-     <ul>
-      <li><a href="#anchor-link"></a>PAGE ANCHOR</li>
-     </ul>
+ <!-- TemplateBeginIf cond="showHero" -->
+   <section class="service-hero">
+   <!-- TemplateBeginEditable name="hero" -->
+   <h2>Hero Title</h2>
+   <p>Hero description for this digital service.</p>
+   <!-- TemplateEndEditable -->
+  </section>
+ <!-- TemplateEndIf -->
+ 
+  <div class="service-content">
+   <section>
+    <!-- TemplateBeginEditable name="overview" -->
+    <h3>Overview</h3>
+    <p>Describe the service and its benefits here.</p>
+    <!-- TemplateEndEditable -->
+   </section>
 
-     <h3>Quick Facts</h3>
-     <ul>
-      <li>Page fact.</li>
-     </ul>
-    </div>
+   <!-- TemplateBeginIf cond="showSidebar" -->
+   <aside>
+    <!-- TemplateBeginEditable name="sidebar" -->
+    <h3>Resources</h3>
+    <ul>
+     <li><a href="#">Documentation</a></li>
+     <li><a href="#">Case studies</a></li>
+     <li><a href="#">FAQs</a></li>
+    </ul>
+    <!-- TemplateEndEditable -->
    </aside>
-  
+   <!-- TemplateEndIf -->
+
+   <section>
+    <!-- TemplateBeginEditable name="details" -->
+    <h3>Details</h3>
+    <p>Implementation details, tooling, and process highlights.</p>
+    <!-- TemplateEndEditable -->
+   </section>
+  </div>
+
+  <!-- TemplateBeginIf cond="showCTA" -->
+  <div class="cta-section">
+   <!-- TemplateBeginEditable name="cta" -->
+   <h3>Ready to get started?</h3>
+   <p>Contact us to discuss your project and goals.</p>
+   <!-- TemplateEndEditable -->
+  </div>
+  <!-- TemplateEndIf -->
  </main>
 
 <!-- InstanceEndEditable -->
@@ -75,7 +103,7 @@
  <script src="/js/script.js"></script> 
  
  <!-- InstanceBeginEditable name="script" -->
- <script>alert("did not work - service.dwt");</script>
+ <script>alert("did not work - item.dwt");</script>
  <!-- InstanceEndEditable -->
 </body>
 <!-- InstanceEnd --></html>

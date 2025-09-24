@@ -23,6 +23,7 @@
     <li><a href="/about.html">About</a></li>
     <li><a href="/blog.html">Blog</a></li>
     <li><a href="/gallery.html">Gallery</a></li>
+    <li><a href="/data.html">Data</a></li>
     <li class="dropdown">
      <a href="#" class="dropbtn">Services ▼</a>
      <div class="dropdown-content">
@@ -46,18 +47,20 @@
  </main>
 
 <!-- TemplateEndEditable -->
-
+<!-- <script>alert("it worked");</script>  -->
  <footer> 
  <!-- TemplateBeginEditable name="footer" --> 
   <p>Footer message.</p> 
  <!-- TemplateEndEditable -->
  </footer>
  
- <!-- <script>alert("it worked");</script>  -->
+ <!-- <script>alert("apply");</script> -->
+ <!-- <script>alert("cancel after first");</script> -->
+ <!-- <script>alert("apply to all");</script> -->
  <script src="/js/script.js"></script> 
  
  <!-- TemplateBeginEditable name="script" -->
-
+ <script>alert("did not work - page.dwt");</script>
  <!-- TemplateEndEditable -->
 </body>
 </html>
