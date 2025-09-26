@@ -12,6 +12,22 @@ let isProtectionEnabled = true;
 let isProcessingUndo = false;
 let isTemplateSyncEnabled = true;
 let templateWatcher: vscode.FileSystemWatcher | undefined;
+// Tracks whether all files in a sync run passed safety checks (undefined until run finishes or first failure occurs)
+
+// Error/exit codes
+// 0 success
+// 1 error/exception
+// 2 cancelled (user cancelled entire run)
+// 3 skipped (user skipped this specific item)
+// 4 safety-skip (user skipped due to safety issues)
+function logProcessCompletion(context: string, errorCode: number = 0) {
+    const line = `[dwt-site-template] Extension process completed (${context}) with error code -> ${errorCode}`;
+    console.log(line);
+    if (outputChannel) outputChannel.appendLine(line);
+}
+
+// Per-file protection state (key: document URI, value: protection enabled)
+let fileProtectionState = new Map<string, boolean>();
 
 // Store last backup information for restore functionality
 let lastBackupInfo: { backupDir: string; templateName: string; instances: vscode.Uri[]; siteRoot: string } | undefined;
@@ -57,8 +73,10 @@ export function activate(context: vscode.ExtensionContext) {
         if (isDreamweaverTemplateFile(document)) {
             return false;
         }
-        // Protect instance files (.html with Dreamweaver comments)
-        return isDreamweaverTemplate(document);
+        // Check file-specific protection state
+        const fileProtectionEnabled = getFileProtectionState(document);
+        // Protect instance files (.html with Dreamweaver comments) only if protection is enabled for this file
+        return fileProtectionEnabled && isDreamweaverTemplate(document);
     }
 
     function saveDocumentSnapshot(document: vscode.TextDocument): void {
@@ -272,16 +290,34 @@ export function activate(context: vscode.ExtensionContext) {
         });
     }
 
+    // Get protection state for specific file (defaults to global setting)
+    function getFileProtectionState(document: vscode.TextDocument): boolean {
+        const uri = document.uri.toString();
+        const fileState = fileProtectionState.get(uri);
+        if (fileState !== undefined) {
+            return fileState;
+        }
+        // Default to global setting
+        const config = vscode.workspace.getConfiguration('dreamweaverTemplate');
+        return config.get('enableProtection', true);
+    }
+
+    // Set protection state for specific file
+    function setFileProtectionState(document: vscode.TextDocument, enabled: boolean): void {
+        const uri = document.uri.toString();
+        fileProtectionState.set(uri, enabled);
+        outputChannel.appendLine(`[PROTECTION] File protection ${enabled ? 'enabled' : 'disabled'} for: ${document.fileName}`);
+    }
+
     function updateDecorations(editor: vscode.TextEditor | undefined) {
         if (!editor) {
             return;
         }
 
-        const config = vscode.workspace.getConfiguration('dreamweaverTemplate');
-        isProtectionEnabled = config.get('enableProtection', true);
+        const fileProtectionEnabled = getFileProtectionState(editor.document);
 
         // Clear decorations if protection is disabled or if this is a .dwt file
-        if (!isProtectionEnabled || isDreamweaverTemplateFile(editor.document)) {
+        if (!fileProtectionEnabled || isDreamweaverTemplateFile(editor.document)) {
             editor.setDecorations(nonEditableDecorationType, []);
             editor.setDecorations(editableDecorationType, []);
             return;
@@ -294,6 +330,7 @@ export function activate(context: vscode.ExtensionContext) {
             return;
         }
 
+        const config = vscode.workspace.getConfiguration('dreamweaverTemplate');
         const protectedRanges = getProtectedRanges(editor.document);
         const editableRanges = getEditableRanges(editor.document);
 
@@ -682,7 +719,9 @@ export function activate(context: vscode.ExtensionContext) {
     }
 
     // New Dreamweaver-style template updating that preserves editable content surgically
-    async function updateHtmlLikeDreamweaver(instanceUri: vscode.Uri, templatePath: string): Promise<boolean> {
+    type MergeResultStatus = 'updated' | 'unchanged' | 'skipped' | 'safetyFailed' | 'cancelled' | 'error';
+    interface MergeResult { status: MergeResultStatus; }
+    async function updateHtmlLikeDreamweaver(instanceUri: vscode.Uri, templatePath: string): Promise<MergeResult> {
         try {
             const instancePath = instanceUri.fsPath;
             console.log(`[DW-MERGE] Start merge for instance: ${instancePath}`);
@@ -784,10 +823,10 @@ export function activate(context: vscode.ExtensionContext) {
             const instanceBeginMatch = instanceContent.match(/<!--\s*InstanceBegin\s+template="([^"]+)"[^>]*-->/i);
             const instanceBegin = instanceBeginMatch ? instanceBeginMatch[0] : `<!-- InstanceBegin template="/Templates/${path.basename(templatePath)}" codeOutsideHTMLIsLocked="true" -->`;
 
-            // Remove stray InstanceBegin occurrences in static segments to avoid duplication
+            // Remove only header InstanceBegin occurrences in static segments (avoid touching InstanceBeginRepeat)
             for (const s of segments) {
                 if (s.kind === 'static') {
-                    s.text = s.text.replace(/<!--\s*InstanceBegin[^>]*-->\s*/gi, '');
+                    s.text = s.text.replace(/<!--\s*InstanceBegin\s+template="[^"]+"[^>]*-->\s*/gi, '');
                 }
             }
 
@@ -828,20 +867,67 @@ export function activate(context: vscode.ExtensionContext) {
                 }
             }
 
-            // Transplant repeat blocks from instance: replace each TemplateBeginRepeat...TemplateEndRepeat
-            // in rebuilt with the matching InstanceBeginRepeat block captured from instance.
-            if (templateRepeatBlocks.size && instanceRepeatBlocks.size) {
-                for (const [rName, block] of templateRepeatBlocks.entries()) {
-                    const instBlock = instanceRepeatBlocks.get(rName);
-                    if (instBlock) {
-                        const repRe = new RegExp(`<!--\\s*TemplateBeginRepeat\\s+name=\"${rName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\"\\s*-->[\\s\\S]*?<!--\\s*TemplateEndRepeat\\s*-->`, 'i');
-                        if (repRe.test(rebuilt)) {
-                            rebuilt = rebuilt.replace(repRe, instBlock);
-                            console.log(`[DW-MERGE] Preserved repeat block "${rName}" from instance`);
-                            outputChannel.appendLine(`[DW-MERGE] Preserved repeat block "${rName}" from instance`);
+            // Repeat block handling: transplant existing instance repeat blocks; then auto-convert leftover template repeat sections
+            if (templateRepeatBlocks.size) {
+                if (instanceRepeatBlocks.size) {
+                    for (const [rName] of templateRepeatBlocks.entries()) {
+                        const instBlock = instanceRepeatBlocks.get(rName);
+                        if (instBlock) {
+                            const repRe = new RegExp(`<!--\\s*TemplateBeginRepeat\\s+name=\"${rName.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}\"\\s*-->[\\s\\S]*?<!--\\s*TemplateEndRepeat\\s*-->`, 'i');
+                            if (repRe.test(rebuilt)) {
+                                rebuilt = rebuilt.replace(repRe, instBlock);
+                                console.log(`[DW-MERGE] Preserved repeat block "${rName}" from instance`);
+                                outputChannel.appendLine(`[DW-MERGE] Preserved repeat block "${rName}" from instance`);
+                            }
                         }
                     }
                 }
+                // Auto-convert any remaining Template repeat wrappers (provide initial structure when instance had none)
+                rebuilt = rebuilt.replace(/<!--\s*TemplateBeginRepeat\s+name="([^"]+)"\s*-->[\s\S]*?<!--\s*TemplateEndRepeat\s*-->/gi, (full, name) => {
+                    let converted = full
+                        .replace(/TemplateBeginRepeat/g, 'InstanceBeginRepeat')
+                        .replace(/TemplateEndRepeat/g, 'InstanceEndRepeat')
+                        .replace(/TemplateBeginRepeatEntry/g, 'InstanceBeginRepeatEntry')
+                        .replace(/TemplateEndRepeatEntry/g, 'InstanceEndRepeatEntry');
+                    // Ensure at least one repeat entry wrapper exists
+                    const hasEntry = /InstanceBeginRepeatEntry/.test(converted);
+                    if (!hasEntry) {
+                        // Wrap inner rows (between first line after begin and before end) into a single entry
+                        const m = /<!--\s*InstanceBeginRepeat\s+name="([^"]+)"\s*-->([\s\S]*?)<!--\s*InstanceEndRepeat\s*-->/i.exec(converted);
+                        if (m) {
+                            const inner = m[2].trim();
+                            const wrappedInner = `\n<!-- InstanceBeginRepeatEntry -->\n${inner}\n<!-- InstanceEndRepeatEntry -->\n`;
+                            converted = converted.replace(m[0], `${m[0].replace(m[2], wrappedInner)}`);
+                        }
+                    }
+                    return converted;
+                });
+            }
+
+            // Post-processing normalization: ensure no stray TemplateEndRepeat left and each InstanceBeginRepeat has a matching InstanceEndRepeat
+            try {
+                // Convert any remaining TemplateEndRepeat tokens defensively
+                rebuilt = rebuilt.replace(/<!--\s*TemplateEndRepeat\s*-->/gi, '<!-- InstanceEndRepeat -->');
+                // For every InstanceBeginRepeat name="X" ensure a closing InstanceEndRepeat exists after its content
+                const beginRepeatRe = /<!--\s*InstanceBeginRepeat\s+name="([^"]+)"\s*-->/gi;
+                const requiredClosers: {name:string; index:number}[] = [];
+                let br: RegExpExecArray | null;
+                while ((br = beginRepeatRe.exec(rebuilt)) !== null) {
+                    requiredClosers.push({ name: br[1], index: br.index });
+                }
+                // Simple heuristic: count closers; if fewer than begins, append missing at end of tbody or end of file
+                const endRepeatCount = (rebuilt.match(/<!--\s*InstanceEndRepeat\s*-->/gi) || []).length;
+                if (endRepeatCount < requiredClosers.length) {
+                    const missing = requiredClosers.length - endRepeatCount;
+                    // Try to insert before closing </tbody> if present else before </table> else end of file
+                    let insertionPoint = rebuilt.search(/<\/tbody>/i);
+                    if (insertionPoint === -1) insertionPoint = rebuilt.search(/<\/table>/i);
+                    if (insertionPoint === -1) insertionPoint = rebuilt.length;
+                    const insertion = '\n' + Array(missing).fill('<!-- InstanceEndRepeat -->').join('\n') + '\n';
+                    rebuilt = rebuilt.slice(0, insertionPoint) + insertion + rebuilt.slice(insertionPoint);
+                }
+            } catch (normErr) {
+                console.warn('[DW-MERGE] Repeat normalization issue:', normErr);
             }
 
             // Append InstanceEnd
@@ -913,6 +999,67 @@ export function activate(context: vscode.ExtensionContext) {
             // Normalize order: ensure InstanceEnd precedes </html>
             rebuilt = rebuilt.replace(/<\/html>\s*<!--\s*InstanceEnd\s*-->/ig, '<!-- InstanceEnd --></html>');
 
+            // --- Alternating bgcolor enforcement (NEW) ---
+            // Extract repeat template row pattern with ternary: <tr bgcolor="@@(_index & 1 ? '#FFFFFF' : '#CCCCCC')@@">
+            function extractBgcolorTernary(template: string): {repeatName: string; colorA: string; colorB: string}[] {
+                const results: {repeatName: string; colorA: string; colorB: string}[] = [];
+                const repeatBlockRe = /<!--\s*TemplateBeginRepeat\s+name="([^"]+)"\s*-->([\s\S]*?)<!--\s*TemplateEndRepeat\s*-->/gi;
+                let rb: RegExpExecArray | null;
+                while ((rb = repeatBlockRe.exec(template)) !== null) {
+                    const rName = rb[1];
+                    const block = rb[2];
+                    const ternaryRe = /<tr[^>]*\sbgcolor="@@\(_index\s*&\s*1\s*\?\s*'([^']+)'\s*:\s*'([^']+)'\)@@"[^>]*>/i;
+                    const m = ternaryRe.exec(block);
+                    if (m) {
+                        results.push({ repeatName: rName, colorA: m[1], colorB: m[2] });
+                    }
+                }
+                return results;
+            }
+
+            function applyAlternatingBgColors(instanceHtml: string, patterns: {repeatName: string; colorA: string; colorB: string}[]): string {
+                if (!patterns.length) return instanceHtml;
+                // For each repeat with a ternary, locate its InstanceBeginRepeat block
+                for (const pat of patterns) {
+                    const instRepeatRe = new RegExp(`(<!--\\s*InstanceBeginRepeat\\s+name=\"${pat.repeatName.replace(/[.*+?^${}()|[\\]\\\\]/g,'\\$&')}\"\\s*-->)([\\s\\S]*?)(<!--\\s*InstanceEndRepeat\\s*-->)`, 'i');
+                    const match = instRepeatRe.exec(instanceHtml);
+                    if (!match) continue;
+                    const before = instanceHtml.slice(0, match.index);
+                    const middle = match[2];
+                    const after = instanceHtml.slice(match.index + match[0].length);
+                    // Split into entries
+                    const entryRe = /(<!--\s*InstanceBeginRepeatEntry\s*-->)([\s\S]*?)(<!--\s*InstanceEndRepeatEntry\s*-->)/g;
+                    let em: RegExpExecArray | null;
+                    let rebuiltEntries = '';
+                    let idx = 0;
+                    while ((em = entryRe.exec(middle)) !== null) {
+                        const entryFull = em[0];
+                        // Replace first <tr ... bgcolor="#XXXXXX" ...> inside entry
+                        const desired = (idx & 1) ? pat.colorA : pat.colorB; // pattern colorA used when index is odd per (_index & 1 ? colorA : colorB)
+                        const swapped = entryFull.replace(/(<tr[^>]*\sbgcolor=")(#?[A-Fa-f0-9]{3,6})("[^>]*>)/, (full, p1, _old, p3) => {
+                            return `${p1}${desired}${p3}`;
+                        });
+                        rebuiltEntries += swapped;
+                        idx++;
+                    }
+                    if (rebuiltEntries) {
+                        const newBlock = match[1] + rebuiltEntries + match[3];
+                        instanceHtml = before + newBlock + after;
+                    }
+                }
+                return instanceHtml;
+            }
+
+            const ternaryPatterns = extractBgcolorTernary(templateContent);
+            if (ternaryPatterns.length) {
+                const beforeColorFix = rebuilt;
+                rebuilt = applyAlternatingBgColors(rebuilt, ternaryPatterns);
+                if (beforeColorFix !== rebuilt) {
+                    console.log(`[DW-MERGE] Applied alternating bgcolor logic for repeats: ${ternaryPatterns.map(p=>p.repeatName).join(', ')}`);
+                }
+            }
+            // --- End alternating bgcolor enforcement ---
+
             // Safety guard: comprehensive validation
             const safetyIssues: string[] = [];
             // A) Check that preserved region presence isn't lost
@@ -939,9 +1086,9 @@ export function activate(context: vscode.ExtensionContext) {
                     safetyIssues.push(`Region "${name}": count decreased (${rebCount} < ${instCount})`);
                 }
             }
-            // C) Repeat integrity: no template repeat tokens and proper instance repeat markers
+            // C) Repeat integrity: no template repeat tokens should remain after auto-conversion
             if (/<!--\s*Template(Begin|End)Repeat/.test(rebuilt)) {
-                safetyIssues.push('Template repeat markers remained in output');
+                safetyIssues.push('Template repeat markers remained in output (post-conversion)');
             }
             for (const rn of Array.from(templateRepeatBlocks.keys())) {
                 const instHas = new RegExp(`<!--\\s*InstanceBeginRepeat\\s+name=\"${rn.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\"`, 'i').test(instanceContent);
@@ -967,95 +1114,120 @@ export function activate(context: vscode.ExtensionContext) {
 
                 if (safetyIssues.length) {
                     const details = `Safety checks failed for ${path.basename(instancePath)}:\n- ${safetyIssues.join('\n- ')}`;
-                    console.error(`[DW-MERGE] ${details}`);
+                    console.warn(`[DW-MERGE] ${details}`);
                     outputChannel.appendLine(details);
-                    const choice = await vscode.window.showErrorMessage(
-                        `Skipped updating ${path.basename(instancePath)} due to safety checks.`,
-                        'View Details'
+                    const NEXT = 'Next File';
+                    const SHOW = 'Show Error';
+                    const decision = await vscode.window.showWarningMessage(
+                        `Safety checks flagged ${path.basename(instancePath)}.`,
+                        { modal: true },
+                        NEXT, SHOW
                     );
-                    if (choice === 'View Details') outputChannel.show(true);
-                    return false;
-                }
-
-                // Interactive confirmation with optional diff preview
-                const cfg = vscode.workspace.getConfiguration('dreamweaverTemplate');
-                const confirm = cfg.get<boolean>('confirmBeforeApply', true);
-                if (!applyToAllForRun && confirm) {
-                    const APPLY = 'Apply';
-                    const APPLY_ALL = 'Apply to All';
-                    const SKIP = 'Skip';
-                    const PREVIEW = 'Preview Diff';
-
-                    let decision: string | undefined;
-                    if (!previewModeForRun) {
-                        decision = await vscode.window.showInformationMessage(
-                            `Apply template changes to ${path.basename(instancePath)}?`,
-                            { modal: true },
-                            APPLY, APPLY_ALL, PREVIEW, SKIP
-                        );
-                        if (decision === PREVIEW) {
-                            try {
-                                previewModeForRun = true; // enter preview mode for this run
-                                const siteRoot = path.dirname(path.dirname(templatePath));
-                                const tempDir = path.join(siteRoot, '.dwt-template-protection-temp');
-                                fs.mkdirSync(tempDir, { recursive: true });
-                                const tempPath = path.join(tempDir, path.basename(instancePath));
-                                fs.writeFileSync(tempPath, rebuilt, 'utf8');
-                                await vscode.commands.executeCommand('vscode.diff', vscode.Uri.file(instancePath), vscode.Uri.file(tempPath), `Preview: ${path.basename(instancePath)}`);
-                                decision = await vscode.window.showInformationMessage(
-                                    `Apply changes to ${path.basename(instancePath)}?`,
-                                    { modal: true },
-                                    APPLY, APPLY_ALL, SKIP
-                                );
-                                try { fs.unlinkSync(tempPath); } catch {}
-                            } catch (e) {
-                                console.warn('Failed to open diff preview:', e);
-                            }
-                        }
-                    } else {
-                        // In preview mode, auto-open the diff for this file, then show the apply/skip dialog
+                    if (decision === SHOW) {
                         try {
                             const siteRoot = path.dirname(path.dirname(templatePath));
                             const tempDir = path.join(siteRoot, '.dwt-template-protection-temp');
                             fs.mkdirSync(tempDir, { recursive: true });
                             const tempPath = path.join(tempDir, path.basename(instancePath));
                             fs.writeFileSync(tempPath, rebuilt, 'utf8');
-                            await vscode.commands.executeCommand('vscode.diff', vscode.Uri.file(instancePath), vscode.Uri.file(tempPath), `Preview: ${path.basename(instancePath)}`);
-                            decision = await vscode.window.showInformationMessage(
-                                `Apply changes to ${path.basename(instancePath)}?`,
-                                { modal: true },
-                                APPLY, APPLY_ALL, SKIP
-                            );
-                            try { fs.unlinkSync(tempPath); } catch {}
+                            await vscode.commands.executeCommand('vscode.diff', vscode.Uri.file(instancePath), vscode.Uri.file(tempPath), `Safety: ${path.basename(instancePath)}`);
                         } catch (e) {
-                            console.warn('Failed to open diff preview:', e);
+                            vscode.window.showErrorMessage('Failed to show safety diff.');
                         }
+                        // Secondary popup (show error popup)
+                        const NEXT2 = 'Next File';
+                        const decision2 = await vscode.window.showWarningMessage(
+                            `Review safety diff for ${path.basename(instancePath)}.`,
+                            { modal: true },
+                            NEXT2
+                        );
+                        if (decision2 === undefined) {
+                            // treat close as Next File (skip)
+                        }
+                        logProcessCompletion('updateHtmlLikeDreamweaver:item-safety-diff-shown', 4);
+                        return { status: 'safetyFailed' }; // Skip editing
                     }
-
-                    if (decision === APPLY_ALL) {
-                        applyToAllForRun = true;
-                    } else if (decision === SKIP) {
-                        outputChannel.appendLine(`[DW-MERGE] User skipped applying changes to ${instancePath}`);
-                        return false;
-                    } else if (decision !== APPLY) {
-                        // Treat undefined dismissal as cancel for this run
+                    if (decision === NEXT) {
+                        logProcessCompletion('updateHtmlLikeDreamweaver:item-safety-skip', 4);
+                        return { status: 'safetyFailed' };
+                    }
+                    if (decision === undefined) { // user cancelled (native Cancel)
                         cancelRunForRun = true;
-                        outputChannel.appendLine(`[DW-MERGE] User dismissed dialog; cancelling run at ${instancePath}`);
-                        return false;
+                        logProcessCompletion('updateHtmlLikeDreamweaver:run-cancelled', 2);
+                        return { status: 'cancelled' };
                     }
+                    // Any other outcome (should not happen) treat as skip
+                    logProcessCompletion('updateHtmlLikeDreamweaver:item-safety-skip', 4);
+                    return { status: 'safetyFailed' };
                 }
 
-                fs.writeFileSync(instancePath, rebuilt, 'utf8');
-                console.log(`[DW-MERGE] Wrote updated instance: ${instancePath}`);
-                outputChannel.appendLine(`[DW-MERGE] Wrote updated instance: ${instancePath}`);
+                // --- Update Popup for passing safety ---
+                let wrote = false;
+                if (applyToAllForRun) {
+                    fs.writeFileSync(instancePath, rebuilt, 'utf8');
+                    wrote = true;
+                } else {
+                    const APPLY = 'Apply';
+                    const APPLY_ALL = 'Apply to All';
+                    const SHOW_DIFF = 'Show Diff';
+                    const SKIP = 'Skip';
+                    let decision: string | undefined = await vscode.window.showInformationMessage(
+                        `Update '${path.basename(instancePath)}' with template changes?`,
+                        { modal: true },
+                        APPLY, APPLY_ALL, SHOW_DIFF, SKIP
+                    );
+                    if (decision === SHOW_DIFF) {
+                        // Prepare temp file for diff
+                        try {
+                            const siteRoot = path.dirname(path.dirname(templatePath));
+                            const tempDir = path.join(siteRoot, '.dwt-template-protection-temp');
+                            fs.mkdirSync(tempDir, { recursive: true });
+                            const tempPath = path.join(tempDir, path.basename(instancePath));
+                            fs.writeFileSync(tempPath, rebuilt, 'utf8');
+                            await vscode.commands.executeCommand('vscode.diff', vscode.Uri.file(instancePath), vscode.Uri.file(tempPath), `Diff: ${path.basename(instancePath)}`);
+                        } catch (e) {
+                            vscode.window.showErrorMessage('Failed to show diff.');
+                        }
+                        // secondary popup after diff
+                        decision = await vscode.window.showInformationMessage(
+                            `Apply template changes to '${path.basename(instancePath)}'?`,
+                            { modal: true },
+                            APPLY, APPLY_ALL, SKIP
+                        );
+                    }
+                    if (decision === APPLY_ALL) {
+                        applyToAllForRun = true;
+                        fs.writeFileSync(instancePath, rebuilt, 'utf8');
+                        wrote = true;
+                    } else if (decision === APPLY) {
+                        fs.writeFileSync(instancePath, rebuilt, 'utf8');
+                        wrote = true;
+                    } else if (decision === SKIP) {
+                        logProcessCompletion('updateHtmlLikeDreamweaver:item-skipped', 3);
+                        return { status: 'skipped' };
+                    } else if (decision === undefined) { // user pressed native Cancel (X) in modal
+                        cancelRunForRun = true;
+                        logProcessCompletion('updateHtmlLikeDreamweaver:run-cancelled', 2);
+                        return { status: 'cancelled' };
+                    } else { // SKIP or unexpected label
+                        logProcessCompletion('updateHtmlLikeDreamweaver:item-skipped', 3);
+                        return { status: 'skipped' };
+                    }
+                }
+                if (wrote) {
+                    console.log(`[DW-MERGE] Wrote updated instance: ${instancePath}`);
+                    outputChannel.appendLine(`[DW-MERGE] Wrote updated instance: ${instancePath}`);
+                }
             } else {
                 console.log('[DW-MERGE] No changes needed (already up to date)');
                 outputChannel.appendLine('[DW-MERGE] No changes needed (already up to date)');
             }
-            return true;
+            logProcessCompletion('updateHtmlLikeDreamweaver:item-updated');
+            return { status: 'updated' };
         } catch (e) {
             console.error(`[DW-MERGE] Failed merging instance ${instanceUri.fsPath}:`, e);
-            return false;
+            logProcessCompletion('updateHtmlLikeDreamweaver:item-error', 1);
+            return { status: 'error' };
         }
     }
 
@@ -1248,15 +1420,15 @@ export function activate(context: vscode.ExtensionContext) {
                     applyToAllForRun = false; // reset
                     previewModeForRun = false; // reset
                     cancelRunForRun = false; // reset
-                    const results: boolean[] = [];
+                    const results: MergeResult[] = [];
                     for (let i = 0; i < instances.length; i++) {
                         if (token.isCancellationRequested) {
-                            results.push(false);
+                            results.push({ status: 'cancelled' });
                             break;
                         }
                         const instanceUri = instances[i];
                         if (cancelRunForRun) {
-                            results.push(false);
+                            results.push({ status: 'cancelled' });
                             break;
                         }
                         const result = await updateHtmlLikeDreamweaver(instanceUri, templateUri.fsPath);
@@ -1275,8 +1447,13 @@ export function activate(context: vscode.ExtensionContext) {
                         return;
                     }
                     
-                    const successCount = results.filter((success: boolean) => success).length;
-                    const failCount = results.length - successCount;
+                    // Determine success/failure counts
+                    const successCount = results.filter(r => r.status === 'updated' || r.status === 'unchanged').length;
+                    const safetyFailCount = results.filter(r => r.status === 'safetyFailed').length;
+                    const errorCount = results.filter(r => r.status === 'error').length;
+                    const skippedCount = results.filter(r => r.status === 'skipped').length;
+                    const totalProcessed = results.length;
+                    // (processSafetyCheckPass removed) Always show final completion popup later regardless
                     
                     let message = `Updated ${successCount} HTML file(s) while preserving editable content`;
                     if (childTemplates.length > 0) {
@@ -1286,11 +1463,9 @@ export function activate(context: vscode.ExtensionContext) {
                     
                     if (cancelRunForRun) {
                         vscode.window.showWarningMessage('Template update was cancelled. Some files may not be updated.');
-                    } else if (failCount > 0) {
-                        message += ` (${failCount} failed)`;
-                        vscode.window.showWarningMessage(message);
                     } else {
-                        vscode.window.showInformationMessage(message);
+                        // Show summary only if all safety checks passed OR there were updates; final failed safety popup handled below
+                        vscode.window.showInformationMessage(`${message} (Safety failures: ${safetyFailCount}, Errors: ${errorCount}, Skipped: ${skippedCount})`);
                     }
                 } else {
                     // Only child templates were updated
@@ -1309,9 +1484,16 @@ export function activate(context: vscode.ExtensionContext) {
                     updateDecorations(vscode.window.activeTextEditor);
                 }
                 
+                // Always show final completion popup
+                if (!cancelRunForRun) {
+                    // Single-button completion notice (no Cancel)
+                    await vscode.window.showInformationMessage('The process of "Updating HTML Files Based on Template" is complete.', { modal: true });
+                }
+                if (cancelRunForRun) logProcessCompletion('updateHtmlBasedOnTemplate:cancelled', 2); else logProcessCompletion('updateHtmlBasedOnTemplate');
             } catch (error) {
                 console.error('Error during template update:', error);
                 vscode.window.showErrorMessage(`Template update failed: ${error instanceof Error ? error.message : String(error)}`);
+                logProcessCompletion('updateHtmlBasedOnTemplate', 1);
             }
         });
     }
@@ -1413,6 +1595,7 @@ export function activate(context: vscode.ExtensionContext) {
         const editor = vscode.window.activeTextEditor;
         if (!editor) {
             vscode.window.showWarningMessage('No active editor. Open a .dwt template file.');
+            logProcessCompletion('syncTemplate:no-editor', 3);
             return;
         }
         if (!ensureWorkspaceContext(editor.document.uri)) return;
@@ -1426,9 +1609,11 @@ export function activate(context: vscode.ExtensionContext) {
             );
             if (choice === 'Yes') {
                 await updateHtmlBasedOnTemplate(editor.document.uri);
+                if (cancelRunForRun) logProcessCompletion('syncTemplate:cancelled', 2); else logProcessCompletion('syncTemplate');
             }
         } else {
             vscode.window.showErrorMessage('This command only works on Dreamweaver template (.dwt) files.');
+            logProcessCompletion('syncTemplate:not-template', 3);
         }
     });
 
@@ -1436,6 +1621,7 @@ export function activate(context: vscode.ExtensionContext) {
         // Check if backup info exists first
         if (!lastBackupInfo) {
             vscode.window.showErrorMessage('No backup information found. Cannot restore files.');
+            logProcessCompletion('restoreBackup:no-backup', 1);
             return;
         }
         if (!ensureWorkspaceContext()) return;
@@ -1452,6 +1638,7 @@ export function activate(context: vscode.ExtensionContext) {
         
         if (choice === 'Yes') {
             await restoreHtmlFromBackup();
+            logProcessCompletion('restoreBackup');
         }
     });
 
@@ -1466,6 +1653,7 @@ export function activate(context: vscode.ExtensionContext) {
         const editor = vscode.window.activeTextEditor;
         if (!editor) {
             vscode.window.showWarningMessage('No active editor. Open a .dwt template file.');
+            logProcessCompletion('findInstances:no-editor', 3);
             return;
         }
         if (!ensureWorkspaceContext(editor.document.uri)) return;
@@ -1489,14 +1677,175 @@ export function activate(context: vscode.ExtensionContext) {
                                 vscode.window.showTextDocument(selectedUri);
                             }
                         }
+                        logProcessCompletion('findInstances');
                     });
                 } else {
                     vscode.window.showInformationMessage('No instances found for this template.');
+                    logProcessCompletion('findInstances:empty', 0);
                 }
             });
         } else {
             vscode.window.showErrorMessage('This command only works on Dreamweaver template (.dwt) files.');
+            logProcessCompletion('findInstances:not-template', 3);
         }
+    });
+
+    // Helper function to find repeat block containing cursor position
+    function findRepeatBlockAtCursor(document: vscode.TextDocument, position: vscode.Position): { repeatName: string; firstEntry: string; entryStart: number; entryEnd: number } | null {
+        const text = document.getText();
+        const cursorOffset = document.offsetAt(position);
+        
+        // Find all repeat blocks in document
+        const repeatBlockRegex = /<!--\s*InstanceBeginRepeat\s+name="([^"]+)"\s*-->([\s\S]*?)<!--\s*InstanceEndRepeat\s*-->/g;
+        let repeatMatch;
+        
+        while ((repeatMatch = repeatBlockRegex.exec(text)) !== null) {
+            const repeatName = repeatMatch[1];
+            const repeatContent = repeatMatch[2];
+            const repeatStart = repeatMatch.index;
+            const repeatEnd = repeatStart + repeatMatch[0].length;
+            
+            // Check if cursor is within this repeat block
+            if (cursorOffset >= repeatStart && cursorOffset <= repeatEnd) {
+                // Find all repeat entries within this block
+                const entryRegex = /<!--\s*InstanceBeginRepeatEntry\s*-->([\s\S]*?)<!--\s*InstanceEndRepeatEntry\s*-->/g;
+                let entryMatch;
+                let firstEntryContent = '';
+                
+                while ((entryMatch = entryRegex.exec(repeatContent)) !== null) {
+                    const entryStart = repeatStart + repeatMatch[0].indexOf(repeatContent) + entryMatch.index;
+                    const entryEnd = entryStart + entryMatch[0].length;
+                    
+                    // Check if cursor is within a repeat entry
+                    if (cursorOffset >= entryStart && cursorOffset <= entryEnd) {
+                        // Capture first entry content if not already captured
+                        if (!firstEntryContent) {
+                            firstEntryContent = entryMatch[0]; // Include the full entry with markers
+                        }
+                        
+                        return {
+                            repeatName,
+                            firstEntry: firstEntryContent,
+                            entryStart,
+                            entryEnd
+                        };
+                    }
+                }
+            }
+        }
+        
+        return null;
+    }
+
+    // Normalize alternating row colors for a repeat if template defines ternary bgcolor pattern
+    async function normalizeRepeatColorsIfNeeded(document: vscode.TextDocument, repeatName: string): Promise<void> {
+        try {
+            const full = document.getText();
+            const instBegin = /<!--\s*InstanceBegin\s+template="([^"]+)"[^>]*-->/i.exec(full);
+            if (!instBegin) return;
+            const templateRel = instBegin[1];
+            const ws = vscode.workspace.workspaceFolders?.[0];
+            if (!ws) return;
+            const templateFsPath = path.join(ws.uri.fsPath, templateRel.replace(/^\//, ''));
+            if (!fs.existsSync(templateFsPath)) return;
+            const templateText = fs.readFileSync(templateFsPath, 'utf8');
+            const repeatBlockRe = new RegExp(`<!--\\s*TemplateBeginRepeat\\s+name=\"${repeatName.replace(/[.*+?^${}()|[\\]\\\\]/g,'\\$&')}\"\\s*-->[\\s\\S]*?<!--\\s*TemplateEndRepeat\\s*-->`,'i');
+            const tmplRepeat = repeatBlockRe.exec(templateText);
+            if (!tmplRepeat) return;
+            const ternaryRe = /<tr[^>]*\sbgcolor="@@\(_index\s*&\s*1\s*\?\s*'([^']+)'\s*:\s*'([^']+)'\)@@"[^>]*>/i;
+            const ternaryMatch = ternaryRe.exec(tmplRepeat[0]);
+            if (!ternaryMatch) return;
+            const colorA = ternaryMatch[1];
+            const colorB = ternaryMatch[2];
+            const instRepeatRe = new RegExp(`(<!--\\s*InstanceBeginRepeat\\s+name=\"${repeatName.replace(/[.*+?^${}()|[\\]\\\\]/g,'\\$&')}\"\\s*-->)([\\s\\S]*?)(<!--\\s*InstanceEndRepeat\\s*-->)`,'i');
+            const instMatch = instRepeatRe.exec(full);
+            if (!instMatch) return;
+            const before = full.slice(0, instMatch.index);
+            const middle = instMatch[2];
+            const after = full.slice(instMatch.index + instMatch[0].length);
+            const entryRe = /(<!--\s*InstanceBeginRepeatEntry\s*-->)([\s\S]*?)(<!--\s*InstanceEndRepeatEntry\s*-->)/g;
+            let em: RegExpExecArray | null;
+            let rebuiltEntries = '';
+            let idx = 0;
+            while ((em = entryRe.exec(middle)) !== null) {
+                const entryFull = em[0];
+                const desired = (idx & 1) ? colorA : colorB; // semantics: _index & 1 ? colorA : colorB
+                const swapped = entryFull.replace(/(<tr[^>]*\sbgcolor=")(#?[A-Fa-f0-9]{3,6})("[^>]*>)/, (full, p1, _old, p3) => `${p1}${desired}${p3}`);
+                rebuiltEntries += swapped;
+                idx++;
+            }
+            if (!rebuiltEntries) return;
+            const newBlock = instMatch[1] + rebuiltEntries + instMatch[3];
+            const updated = before + newBlock + after;
+            if (updated !== full) {
+                const edit = new vscode.WorkspaceEdit();
+                edit.replace(document.uri, new vscode.Range(document.positionAt(0), document.positionAt(full.length)), updated);
+                await vscode.workspace.applyEdit(edit);
+                outputChannel.appendLine(`[REPEAT-ALT] Normalized alternating bg colors for repeat "${repeatName}" (${colorA}/${colorB}).`);
+            }
+        } catch (e) {
+            console.warn('normalizeRepeatColorsIfNeeded failed:', e);
+        }
+    }
+
+    // Insert repeat entry after selection
+    const insertRepeatEntryAfterCommand = vscode.commands.registerCommand('dreamweaverTemplate.insertRepeatEntryAfter', async () => {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            vscode.window.showWarningMessage('No active editor.');
+            return;
+        }
+        
+        const position = editor.selection.active;
+        const repeatBlock = findRepeatBlockAtCursor(editor.document, position);
+        
+        if (!repeatBlock) {
+            vscode.window.showWarningMessage('Cursor must be within a repeat entry block (between InstanceBeginRepeatEntry and InstanceEndRepeatEntry).');
+            return;
+        }
+        
+        const insertPosition = editor.document.positionAt(repeatBlock.entryEnd);
+        const edit = new vscode.WorkspaceEdit();
+        edit.insert(editor.document.uri, insertPosition, '\n' + repeatBlock.firstEntry);
+        
+        await vscode.workspace.applyEdit(edit);
+
+        // Normalize alternating colors if template defines a ternary for this repeat
+        await normalizeRepeatColorsIfNeeded(editor.document, repeatBlock.repeatName);
+        vscode.window.showInformationMessage(`Inserted repeat entry after selection in "${repeatBlock.repeatName}"`);
+        
+        outputChannel.appendLine(`[REPEAT-INSERT] Added entry after selection in repeat "${repeatBlock.repeatName}"`);
+        logProcessCompletion('insertRepeatEntryAfter');
+    });
+
+    // Insert repeat entry before selection  
+    const insertRepeatEntryBeforeCommand = vscode.commands.registerCommand('dreamweaverTemplate.insertRepeatEntryBefore', async () => {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            vscode.window.showWarningMessage('No active editor.');
+            return;
+        }
+        
+        const position = editor.selection.active;
+        const repeatBlock = findRepeatBlockAtCursor(editor.document, position);
+        
+        if (!repeatBlock) {
+            vscode.window.showWarningMessage('Cursor must be within a repeat entry block (between InstanceBeginRepeatEntry and InstanceEndRepeatEntry).');
+            return;
+        }
+        
+        const insertPosition = editor.document.positionAt(repeatBlock.entryStart);
+        const edit = new vscode.WorkspaceEdit();
+        edit.insert(editor.document.uri, insertPosition, repeatBlock.firstEntry + '\n');
+        
+        await vscode.workspace.applyEdit(edit);
+
+        // Normalize alternating colors if template defines a ternary for this repeat
+        await normalizeRepeatColorsIfNeeded(editor.document, repeatBlock.repeatName);
+        vscode.window.showInformationMessage(`Inserted repeat entry before selection in "${repeatBlock.repeatName}"`);
+        
+        outputChannel.appendLine(`[REPEAT-INSERT] Added entry before selection in repeat "${repeatBlock.repeatName}"`);
+        logProcessCompletion('insertRepeatEntryBefore');
     });
 
     // Initialize template watcher
@@ -1509,10 +1858,342 @@ export function activate(context: vscode.ExtensionContext) {
         }
     }
 
+    // Protection toggle commands
+    const turnOffProtectionCommand = vscode.commands.registerCommand('dreamweaverTemplate.turnOffProtection', () => {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            vscode.window.showWarningMessage('No active editor to modify protection for.');
+            return;
+        }
+        if (!isDreamweaverTemplate(editor.document) || isDreamweaverTemplateFile(editor.document)) {
+            vscode.window.showInformationMessage('Protection settings only apply to Dreamweaver template instance files (.html/.php with template comments).');
+            return;
+        }
+        setFileProtectionState(editor.document, false);
+        updateDecorations(editor);
+        vscode.window.showInformationMessage(`Protection turned OFF for ${path.basename(editor.document.fileName)}`);
+    });
+
+    const turnOnProtectionCommand = vscode.commands.registerCommand('dreamweaverTemplate.turnOnProtection', () => {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            vscode.window.showWarningMessage('No active editor to modify protection for.');
+            return;
+        }
+        if (!isDreamweaverTemplate(editor.document) || isDreamweaverTemplateFile(editor.document)) {
+            vscode.window.showInformationMessage('Protection settings only apply to Dreamweaver template instance files (.html/.php with template comments).');
+            return;
+        }
+        setFileProtectionState(editor.document, true);
+        updateDecorations(editor);
+        vscode.window.showInformationMessage(`Protection turned ON for ${path.basename(editor.document.fileName)}`);
+    });
+
+    // Create New Page from Template command
+    const createPageFromTemplateCommand = vscode.commands.registerCommand('dreamweaverTemplate.createPageFromTemplate', async () => {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor || !editor.document.fileName.toLowerCase().endsWith('.dwt')) {
+            vscode.window.showWarningMessage('Open a .dwt template to create a page.');
+            return;
+        }
+        const templatePath = editor.document.uri.fsPath;
+        const wsFolder = vscode.workspace.workspaceFolders?.[0];
+        if (!wsFolder) {
+            vscode.window.showErrorMessage('Workspace folder required.');
+            return;
+        }
+        // Determine site root dynamically: assume .dwt is inside a "Templates" folder that sits under site root
+        const templateDir = path.dirname(templatePath);
+        const basename = path.basename(templateDir).toLowerCase();
+        let siteRoot: string;
+        if (basename === 'templates') {
+            siteRoot = path.dirname(templateDir);
+        } else {
+            // Fallback: search upward for a Templates folder sibling containing this template (unlikely path)
+            let current = templateDir;
+            let found: string | undefined;
+            for (let i=0;i<6;i++) { // limit ascent to avoid runaway
+                const candidate = path.join(current, 'Templates');
+                if (fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) {
+                    if (fs.existsSync(path.join(candidate, path.basename(templatePath)))) {
+                        found = current;
+                        break;
+                    }
+                }
+                const parent = path.dirname(current);
+                if (parent === current) break;
+                current = parent;
+            }
+            if (found) {
+                siteRoot = found;
+            } else {
+                vscode.window.showErrorMessage('Unable to determine site root (expected template in a "Templates" folder).');
+                return;
+            }
+        }
+
+        // Build folder tree structure
+        interface FolderNode { name: string; fullPath: string; children: FolderNode[]; }
+        function readFolders(dir: string): FolderNode {
+            const node: FolderNode = { name: path.basename(dir), fullPath: dir, children: [] };
+            try {
+                const entries = fs.readdirSync(dir, { withFileTypes: true });
+                for (const e of entries) {
+                    if (e.isDirectory()) {
+                        const fullChild = path.join(dir, e.name);
+                        const lower = e.name.toLowerCase();
+                        // Skip Templates root itself for destination + skip internal metadata folders
+                        if (lower === 'templates' && fullChild === path.join(siteRoot, 'Templates')) continue;
+                        if (lower.startsWith('.dwt-template') || lower.startsWith('.dwt-site-template')) continue;
+                        node.children.push(readFolders(fullChild));
+                    }
+                }
+                node.children.sort((a,b)=> a.name.localeCompare(b.name));
+            } catch {}
+            return node;
+        }
+        const tree = readFolders(siteRoot);
+
+        // Serialize tree to send to webview
+        function flatten(node: FolderNode, depth = 0): any[] {
+            const rel = path.relative(siteRoot, node.fullPath).replace(/\\/g,'/');
+            // Root node should display actual site root folder name (request)
+            const rootName = path.basename(siteRoot);
+            const display = (depth===0? rootName : node.name);
+            const arr = [{ name: node.name, display, fullPath: node.fullPath, rel: rel || '.', depth, children: node.children.length>0 }];
+            for (const c of node.children) arr.push(...flatten(c, depth+1));
+            return arr;
+        }
+        const flat = flatten(tree);
+
+        // Create panel
+        const panel = vscode.window.createWebviewPanel(
+            'createPageFromTemplate',
+            'Create New Page from Template',
+            vscode.ViewColumn.Active,
+            { enableScripts: true }
+        );
+
+        const nonce = Date.now().toString();
+        panel.webview.html = getCreatePageHtml(flat, nonce);
+
+        panel.webview.onDidReceiveMessage(async msg => {
+            if (msg.type === 'validateName') {
+                const targetPath = path.join(siteRoot, msg.relPath === '.' ? '' : msg.relPath, msg.fileName + (msg.ext === 'php'? '.php': '.html'));
+                const exists = fs.existsSync(targetPath);
+                panel.webview.postMessage({ type: 'validationResult', exists });
+            } else if (msg.type === 'save') {
+                const relPath: string = msg.relPath; // '.' or relative folder
+                const fileBase: string = msg.fileName || 'untitled';
+                const ext: string = msg.ext === 'php' ? 'php' : 'html';
+                const targetPath = path.join(siteRoot, relPath === '.' ? '' : relPath, `${fileBase}.${ext}`);
+                if (fs.existsSync(targetPath) && !msg.overwrite) {
+                    // Request overwrite confirmation
+                    const choice = await vscode.window.showWarningMessage(`The file "${path.relative(siteRoot, targetPath)}" already exists. Overwrite?`, 'Yes', 'No', 'Cancel');
+                    if (choice === 'Yes') {
+                        await writeNewInstance(targetPath, templatePath, ext);
+                        panel.dispose();
+                    } else if (choice === 'No') {
+                        panel.webview.postMessage({ type: 'overwriteDenied' });
+                    } else {
+                        panel.dispose();
+                    }
+                } else {
+                    await writeNewInstance(targetPath, templatePath, ext);
+                    panel.dispose();
+                }
+            } else if (msg.type === 'cancel') {
+                panel.dispose();
+            }
+        });
+
+        async function writeNewInstance(targetPath: string, templatePath: string, ext: string) {
+            try {
+                let output = fs.readFileSync(templatePath, 'utf8'); // start as raw copy (duplicate template)
+
+                // Determine lock flag from template (default true)
+                const info = /<!--\s*TemplateInfo\s+codeOutsideHTMLIsLocked="(true|false)"\s*-->/i.exec(output);
+                const lockFlag = info ? info[1].toLowerCase() : 'true';
+
+                // Insert InstanceBegin after <html...> preserving original <html> tag exactly once.
+                // Remove only the existing template header (do NOT remove InstanceBeginEditable / Repeat markers)
+                output = output.replace(/<!--\s*InstanceBegin\s+template="[^"]+"[^>]*-->/i, '');
+                // Mark placeholder CHANGE first, then replace with final lockFlag after confirm.
+                output = output.replace(/(<html[^>]*>)/i, (m)=> `${m}<!-- InstanceBegin template="/Templates/${path.basename(templatePath)}" codeOutsideHTMLIsLocked="CHANGE" -->`);
+
+                // Convert TemplateBeginEditable/TemplateEndEditable to Instance equivalents (keep region names/content)
+                output = output.replace(/<!--\s*TemplateBeginEditable/g, '<!-- InstanceBeginEditable');
+                output = output.replace(/TemplateEndEditable/g, 'InstanceEndEditable');
+
+                // Convert Template repeat related markers
+                output = output.replace(/<!--\s*TemplateBeginRepeat/g, '<!-- InstanceBeginRepeat');
+                output = output.replace(/TemplateEndRepeat/g, 'InstanceEndRepeat');
+                output = output.replace(/TemplateBeginRepeatEntry/g, 'InstanceBeginRepeatEntry');
+                output = output.replace(/TemplateEndRepeatEntry/g, 'InstanceEndRepeatEntry');
+
+                // Finally convert any other TemplateBegin/TemplateEnd (safety) AFTER specific ones handled
+                output = output.replace(/<!--\s*TemplateBegin/g, '<!-- InstanceBegin');
+                output = output.replace(/TemplateEnd/g, 'InstanceEnd');
+
+                // Remove TemplateInfo line entirely from instance file
+                output = output.replace(/<!--\s*TemplateInfo\s+codeOutsideHTMLIsLocked="(true|false)"\s*-->/ig, '');
+
+                // Replace CHANGE with proper lock flag validation (only true/false accepted)
+                const finalLock = (lockFlag === 'true' || lockFlag === 'false') ? lockFlag : 'true';
+                output = output.replace(/codeOutsideHTMLIsLocked="CHANGE"/, `codeOutsideHTMLIsLocked="${finalLock}"`);
+
+                // Ensure single InstanceEnd before </html>
+                output = output.replace(/<!--\s*InstanceEnd\s*-->/ig, '');
+                output = output.replace(/(<\/html>)/i, '<!-- InstanceEnd -->$1');
+
+                // Balance check: remove stray InstanceEndEditable without matching begin (simple stack)
+                const tokenRe = /<!--\s*Instance(BeginEditable|EndEditable)[^>]*-->/g;
+                let match: RegExpExecArray | null; let balance = 0; const removals: {start:number;end:number}[] = [];
+                while ((match = tokenRe.exec(output)) !== null) {
+                    const isBegin = /BeginEditable/i.test(match[0]);
+                    if (isBegin) balance++; else { if (balance === 0) removals.push({start:match.index,end:match.index+match[0].length}); else balance--; }
+                }
+                if (removals.length) {
+                    removals.sort((a,b)=>b.start-a.start).forEach(r=>{ output = output.slice(0,r.start)+output.slice(r.end); });
+                }
+                // Change extension-specific things (none currently) - placeholder
+                const dir = path.dirname(targetPath);
+                fs.mkdirSync(dir, { recursive: true });
+                // Ensure any TemplateEndRepeat left is converted properly with entry markers (defensive)
+                output = output.replace(/<!--\s*TemplateEndRepeat\s*-->/gi, '<!-- InstanceEndRepeatEntry --><!-- InstanceEndRepeat -->');
+                fs.writeFileSync(targetPath, output, 'utf8');
+                const rel = path.relative(siteRoot, targetPath).replace(/\\/g,'/');
+                vscode.window.showInformationMessage(`Created new page: ${rel}`);
+                const doc = await vscode.workspace.openTextDocument(targetPath);
+                await vscode.window.showTextDocument(doc);
+                logProcessCompletion('createPageFromTemplate');
+            } catch (e:any) {
+                vscode.window.showErrorMessage(`Failed to create page: ${e.message || e}`);
+                logProcessCompletion('createPageFromTemplate', 1);
+            }
+        }
+
+                function getCreatePageHtml(flatFolders: any[], nonce: string): string {
+                        // Build a hierarchical map for dynamic expand/collapse in client
+                        const json = JSON.stringify(flatFolders);
+                        return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Create Page</title>
+<style>
+body { font-family: Consolas, monospace; padding:12px; }
+fieldset { border:1px solid #888; margin-bottom:12px; }
+legend { font-weight:bold; }
+.row { margin:8px 0; }
+label { display:inline-block; min-width:100px; }
+input[type=text] { width:260px; }
+.ext-toggle span { cursor:pointer; padding:4px 10px; border:1px solid #666; margin-right:4px; }
+.ext-toggle span.active { background:#004; color:#fff; }
+.folder-container { border:1px solid #666; height:240px; overflow:auto; padding:4px; background:#111; color:#ccc; font-size:13px; }
+.folder { cursor:pointer; user-select:none; white-space:nowrap; }
+.folder.selected { background:#333; color:#fff; }
+.buttons { text-align:center; margin-top:16px; }
+button { width:140px; padding:6px 0; margin:0 12px; font-weight:bold; }
+button#saveBtn { background:#0a0; color:#fff; border:1px solid #050; }
+button#cancelBtn { background:#555; color:#fff; border:1px solid #333; }
+.exist-warning { color:#f80; font-size:12px; height:16px; }
+.twisty { display:inline-block; width:14px; }
+.collapsed > .children { display:none; }
+.children { margin-left:16px; }
+</style></head><body>
+<div class="row"><strong>Create New Page from Template</strong></div>
+<div class="row ext-toggle" id="extToggle" role="radiogroup" aria-label="File Extension">
+  <span data-ext="html" class="active" role="radio" aria-checked="true">html</span>
+  <span data-ext="php" role="radio" aria-checked="false">php</span>
+</div>
+<div class="row"><label>File Name:</label><input id="fileName" type="text" value="untitled" /> <span>. <span id="extLabel">html</span></span></div>
+<div class="exist-warning" id="existWarn"></div>
+<div class="row"><label style="vertical-align:top;">Save to Folder:</label>
+    <div class="folder-container" id="folderContainer"></div>
+</div>
+<div class="buttons"><button id="saveBtn">Save</button><button id="cancelBtn">Cancel</button></div>
+<script nonce="${nonce}">
+const vscode = acquireVsCodeApi();
+let currentExt = 'html';
+let selectedRel = '.';
+const flat = ${json};
+
+// Build tree (flat contains ordered depth info). We'll reconstruct parent-child by path depth.
+const byRel = new Map(flat.map(f => [f.rel, f]));
+function relDepth(rel){ return rel === '.' ? 0 : rel.split('/').length; }
+function childrenOf(rel){
+    return flat.filter(f => f.rel !== rel && (rel === '.' ? !f.rel.includes('/') : f.rel.startsWith(rel + '/')) && relDepth(f.rel) === relDepth(rel)+1);
+}
+
+function buildNode(rel){
+    const data = byRel.get(rel);
+    if (!data) return '';
+    const kids = childrenOf(rel);
+    const hasChildren = kids.length>0;
+    const label = data.display;
+    let html = '<div class="folder collapsed" data-rel="'+data.rel+'">';
+    html += '<div class="line"><span class="twisty">'+(hasChildren ? '▶' : '')+'</span> <span class="name">'+label+'</span></div>';
+    html += '<div class="children">'+kids.map(c=>buildNode(c.rel)).join('')+'</div>';
+    html += '</div>';
+    return html;
+}
+document.getElementById('folderContainer').innerHTML = buildNode('.');
+
+document.querySelectorAll('#extToggle span').forEach(span=>{
+  span.addEventListener('click', () => {
+    if (span.dataset.ext === currentExt) return; // toggle like radio
+    currentExt = span.dataset.ext;
+    document.querySelectorAll('#extToggle span').forEach(s=>{ s.classList.remove('active'); s.setAttribute('aria-checked','false'); });
+    span.classList.add('active'); span.setAttribute('aria-checked','true');
+    document.getElementById('extLabel').textContent = currentExt;
+    validate();
+  });
+});
+document.getElementById('folderContainer').addEventListener('click', (e)=>{
+    const line = e.target.closest('.line');
+    if (!line) return;
+    const folder = line.parentElement;
+    if (!folder) return;
+    // Toggle collapse if has children
+    if (folder.querySelector('.children') && folder.querySelector('.children').children.length) {
+        folder.classList.toggle('collapsed');
+        const twisty = folder.querySelector('.twisty');
+        if (twisty) twisty.textContent = folder.classList.contains('collapsed') ? '▶' : '▼';
+    }
+    document.querySelectorAll('.folder').forEach(f=>f.classList.remove('selected'));
+    folder.classList.add('selected');
+    selectedRel = folder.getAttribute('data-rel');
+    validate();
+});
+function validate(){
+  const fileName = (document.getElementById('fileName').value||'').trim();
+  if (!fileName) { setWarn('Enter a file name.'); return; }
+  vscode.postMessage({ type:'validateName', fileName, relPath: selectedRel, ext: currentExt });
+}
+function setWarn(msg){ document.getElementById('existWarn').textContent = msg||''; }
+document.getElementById('fileName').addEventListener('input', validate);
+document.getElementById('saveBtn').addEventListener('click', ()=>{
+  const fileName = (document.getElementById('fileName').value||'').trim();
+  if (!fileName) { setWarn('Enter a file name.'); return; }
+  vscode.postMessage({ type:'save', fileName, relPath: selectedRel, ext: currentExt });
+});
+document.getElementById('cancelBtn').addEventListener('click', ()=> vscode.postMessage({ type:'cancel' }));
+window.addEventListener('message', event => {
+  const msg = event.data;
+  if (msg.type === 'validationResult') {
+    setWarn(msg.exists ? 'File exists (will ask to overwrite on Save).' : '');
+  } else if (msg.type === 'overwriteDenied') {
+    setWarn('Choose a different name or folder.');
+  }
+});
+validate();
+</script></body></html>`;
+        }
+    });
+
     context.subscriptions.push(
         changeListener, editorChangeListener, documentOpenListener,
         showEditableRegionsCommand, toggleProtectionCommand,
         syncTemplateCommand, restoreBackupCommand, toggleTemplateSyncCommand, findInstancesCommand,
+        insertRepeatEntryAfterCommand, insertRepeatEntryBeforeCommand, createPageFromTemplateCommand,
+        turnOffProtectionCommand, turnOnProtectionCommand,
         nonEditableDecorationType, editableDecorationType
     );
 

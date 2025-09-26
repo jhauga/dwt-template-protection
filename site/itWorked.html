@@ -11,6 +11,7 @@
 
 <link rel="stylesheet" href="/css/style.css">
 <!-- InstanceBeginEditable name="head" -->
+
 <!-- InstanceEndEditable -->
 </head>
 
@@ -44,28 +45,13 @@
    <h2></h2>
    <p></p>
   </div>
-  
-  <aside>
-   <div>
-    <h3></h3>
-     <ul>
-      <li><a href="#anchor-link"></a>PAGE ANCHOR</li>
-     </ul>
-
-     <h3>Quick Facts</h3>
-     <ul>
-      <li>Page fact.</li>
-     </ul>
-    </div>
-   </aside>
-  
  </main>
 
 <!-- InstanceEndEditable -->
 <!-- <script>alert("it worked");</script>  -->
  <footer> 
  <!-- InstanceBeginEditable name="footer" --> 
- <p>Footer message.</p> 
+  <p>Footer message.</p> 
  <!-- InstanceEndEditable -->
  </footer>
  
@@ -76,7 +62,7 @@
  <script src="/js/script.js"></script> 
  
  <!-- InstanceBeginEditable name="script" -->
- <script>alert("did not work - service.dwt");</script>
+ <script>alert("did not work - page.dwt");</script>
  <!-- InstanceEndEditable -->
 </body>
 <!-- InstanceEnd --></html>

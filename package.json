@@ -36,11 +36,6 @@
                 "category": "Dreamweaver Template"
             },
             {
-                "command": "dreamweaverTemplate.toggleProtection",
-                "title": "Toggle Protection",
-                "category": "Dreamweaver Template"
-            },
-            {
                 "command": "dreamweaverTemplate.syncTemplate",
                 "title": "Update HTML Based on Template",
                 "category": "Dreamweaver Template"
@@ -59,6 +54,31 @@
                 "command": "dreamweaverTemplate.restoreBackup",
                 "title": "Restore Last HTML Backup",
                 "category": "Dreamweaver Template"
+            },
+            {
+                "command": "dreamweaverTemplate.insertRepeatEntryAfter",
+                "title": "Insert Entry After Selection",
+                "category": "Dreamweaver Template"
+            },
+            {
+                "command": "dreamweaverTemplate.insertRepeatEntryBefore",
+                "title": "Insert Entry Before Selection", 
+                "category": "Dreamweaver Template"
+            },
+            {
+                "command": "dreamweaverTemplate.turnOffProtection",
+                "title": "Turn Off Protection",
+                "category": "Dreamweaver Template"
+            },
+            {
+                "command": "dreamweaverTemplate.turnOnProtection",
+                "title": "Turn On Protection",
+                "category": "Dreamweaver Template"
+            },
+            {
+                "command": "dreamweaverTemplate.createPageFromTemplate",
+                "title": "Create New Page from Template",
+                "category": "Dreamweaver Template"
             }
         ],
         "menus": {
@@ -66,11 +86,6 @@
                 {
                     "when": "resourceExtname =~ /\\.(html|htm|php|asp|csp)$/",
                     "command": "dreamweaverTemplate.showEditableRegions",
-                    "group": "dreamweaver"
-                },
-                {
-                    "when": "resourceExtname =~ /\\.(html|htm|php|asp|csp)$/",
-                    "command": "dreamweaverTemplate.toggleProtection",
                     "group": "dreamweaver"
                 },
                 {
@@ -84,17 +99,38 @@
                     "group": "dreamweaver"
                 },
                 {
+                    "when": "resourceExtname == .dwt",
+                    "command": "dreamweaverTemplate.createPageFromTemplate",
+                    "group": "dreamweaver"
+                },
+                {
                     "command": "dreamweaverTemplate.restoreBackup",
                     "group": "dreamweaver"
+                },
+                {
+                    "when": "resourceExtname =~ /\\.(html|htm|php|asp|csp)$/",
+                    "command": "dreamweaverTemplate.insertRepeatEntryAfter",
+                    "group": "dreamweaver@1"
+                },
+                {
+                    "when": "resourceExtname =~ /\\.(html|htm|php|asp|csp)$/",
+                    "command": "dreamweaverTemplate.insertRepeatEntryBefore",
+                    "group": "dreamweaver@2"
+                },
+                {
+                    "when": "resourceExtname =~ /\\.(html|htm|php|asp|csp)$/",
+                    "command": "dreamweaverTemplate.turnOffProtection",
+                    "group": "dreamweaver@3"
+                },
+                {
+                    "when": "resourceExtname =~ /\\.(html|htm|php|asp|csp)$/",
+                    "command": "dreamweaverTemplate.turnOnProtection",
+                    "group": "dreamweaver@3"
                 }
             ],
             "commandPalette": [
                 {
                     "command": "dreamweaverTemplate.showEditableRegions",
-                    "when": "resourceExtname =~ /\\.(html|htm|php|asp|csp)$/"
-                },
-                {
-                    "command": "dreamweaverTemplate.toggleProtection",
                     "when": "resourceExtname =~ /\\.(html|htm|php|asp|csp)$/"
                 },
                 {
@@ -110,6 +146,18 @@
                 },
                 {
                     "command": "dreamweaverTemplate.restoreBackup"
+                },
+                {
+                    "command": "dreamweaverTemplate.insertRepeatEntryAfter",
+                    "when": "resourceExtname =~ /\\.(html|htm|php|asp|csp)$/"
+                },
+                {
+                    "command": "dreamweaverTemplate.insertRepeatEntryBefore", 
+                    "when": "resourceExtname =~ /\\.(html|htm|php|asp|csp)$/"
+                },
+                {
+                    "command": "dreamweaverTemplate.createPageFromTemplate",
+                    "when": "resourceExtname == .dwt"
                 }
             ]
         },

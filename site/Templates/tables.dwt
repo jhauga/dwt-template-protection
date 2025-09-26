@@ -58,8 +58,8 @@
      <td><!-- TemplateBeginEditable name="Description" -->Tailored functionality built for your requirements<!-- TemplateEndEditable --></td>
      <td><!-- TemplateBeginEditable name="Category" -->Development<!-- TemplateEndEditable --></td>
     </tr>
-     <!-- TemplateEndRepeat -->
-    </tbody>
+     <!-- TemplateEndRepeat --> 
+    
    </table>
   </section>
  </main>
@@ -72,13 +72,14 @@
  <!-- InstanceEndEditable -->
  </footer>
  
- <script>alert("apply");</script>
+ <!-- <script>alert("apply");</script> -->
  <!-- <script>alert("cancel after first");</script> -->
  <!-- <script>alert("apply to all");</script> -->
+  
  <script src="/js/script.js"></script> 
  
  <!-- InstanceBeginEditable name="script" -->
- <script>alert("did not work - tables.dwt");</script>
+ 
  <!-- InstanceEndEditable -->
 </body>
 <!-- InstanceEnd --></html>

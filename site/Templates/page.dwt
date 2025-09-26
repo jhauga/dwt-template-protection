@@ -57,10 +57,11 @@
  <!-- <script>alert("apply");</script> -->
  <!-- <script>alert("cancel after first");</script> -->
  <!-- <script>alert("apply to all");</script> -->
+  
  <script src="/js/script.js"></script> 
  
  <!-- TemplateBeginEditable name="script" -->
- <script>alert("did not work - page.dwt");</script>
+ 
  <!-- TemplateEndEditable -->
 </body>
 </html>
