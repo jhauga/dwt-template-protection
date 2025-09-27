@@ -777,36 +777,152 @@ export function activate(context: vscode.ExtensionContext) {
             console.log(`[DW-MERGE] Template regions parsed: ${parsedRegions.map(r=>r.name).join(', ') || '(none)'}`);
             outputChannel.appendLine(`[DW-MERGE] Template regions parsed: ${parsedRegions.map(r=>r.name).join(', ') || '(none)'}`);
             const templateRegionNames = new Set(parsedRegions.map(r => r.name));
+            // Filter to TOP-LEVEL regions only (avoid rebuilding overlapping nested regions twice)
+            const topLevelRegions: ParsedRegion[] = (() => {
+                const out: ParsedRegion[] = [];
+                let currentEnd = -1;
+                for (const r of parsedRegions) {
+                    if (r.begin >= currentEnd) {
+                        out.push(r);
+                        currentEnd = r.end;
+                    } else {
+                        // nested region within previous; skip here, inner will be handled later (nested mode)
+                    }
+                }
+                return out;
+            })();
             // Scan template for ALL editable names (in case parser misses ones inside repeats)
             const allTemplateEditableNames = new Set<string>();
-            const editablePositions: { name: string; index: number }[] = [];
             try {
                 const scanEditableNames = /<!--\s*TemplateBeginEditable\s+name="([^"]+)"\s*-->/gi;
                 let nm: RegExpExecArray | null;
                 while ((nm = scanEditableNames.exec(templateContent)) !== null) {
                     allTemplateEditableNames.add(nm[1]);
-                    editablePositions.push({ name: nm[1], index: nm.index });
                 }
             } catch {}
-            // Heuristic: detect which editables sit inside a TemplateBeginRepeat..TemplateEndRepeat block
-            const namesInsideRepeat = new Set<string>();
-            const isInsideRepeat = (atIndex: number): boolean => {
-                const upTo = templateContent.slice(0, atIndex);
-                const lastBegin = upTo.lastIndexOf('TemplateBeginRepeat');
-                const lastEnd = upTo.lastIndexOf('TemplateEndRepeat');
-                return lastBegin !== -1 && (lastEnd === -1 || lastBegin > lastEnd);
+
+            interface TemplateStructureScan {
+                beginCount: number;
+                endCount: number;
+                names: Set<string>;
+                namesInsideRepeat: Set<string>;
+                nameStats: Map<string, { total: number; insideRepeat: number }>;
+            }
+
+            const scanTemplateStructure = (html: string): TemplateStructureScan => {
+                const tokenRe = /<!--\s*(TemplateBeginRepeat\s+name="([^"]+)"|TemplateEndRepeat|TemplateBeginEditable\s+name="([^"]+)"|TemplateEndEditable)\s*-->/gi;
+                const repeatStack: string[] = [];
+                const names = new Set<string>();
+                const namesInsideRepeat = new Set<string>();
+                const nameStats = new Map<string, { total: number; insideRepeat: number }>();
+                let beginCount = 0;
+                let endCount = 0;
+                let tokenMatch: RegExpExecArray | null;
+                while ((tokenMatch = tokenRe.exec(html)) !== null) {
+                    const raw = tokenMatch[1] ?? '';
+                    if (/^TemplateBeginRepeat/i.test(raw)) {
+                        repeatStack.push(tokenMatch[2] ?? '');
+                        continue;
+                    }
+                    if (/^TemplateEndRepeat/i.test(raw)) {
+                        if (repeatStack.length) repeatStack.pop();
+                        continue;
+                    }
+                    if (/^TemplateBeginEditable/i.test(raw)) {
+                        beginCount++;
+                        const name = tokenMatch[3] ?? '';
+                        names.add(name);
+                        const insideRepeat = repeatStack.length > 0;
+                        if (insideRepeat) namesInsideRepeat.add(name);
+                        const stats = nameStats.get(name) ?? { total: 0, insideRepeat: 0 };
+                        stats.total += 1;
+                        if (insideRepeat) stats.insideRepeat += 1;
+                        nameStats.set(name, stats);
+                        continue;
+                    }
+                    if (/^TemplateEndEditable/i.test(raw)) {
+                        endCount++;
+                        continue;
+                    }
+                }
+                return { beginCount, endCount, names, namesInsideRepeat, nameStats };
             };
-            for (const pos of editablePositions) {
-                if (isInsideRepeat(pos.index)) {
-                    namesInsideRepeat.add(pos.name);
+
+            const collectInstanceEditableNames = (html: string): Set<string> => {
+                const names = new Set<string>();
+                const re = /<!--\s*InstanceBeginEditable\s+name="([^"]+)"\s*-->/gi;
+                let m: RegExpExecArray | null;
+                while ((m = re.exec(html)) !== null) {
+                    names.add(m[1]);
+                }
+                return names;
+            };
+
+            const childStructure = scanTemplateStructure(templateContent);
+            const namesInsideRepeat = new Set<string>(childStructure.namesInsideRepeat);
+            const instanceEditableNames = collectInstanceEditableNames(instanceContent);
+
+            for (const repeatEditableName of namesInsideRepeat) {
+                if (preservedRegions.has(repeatEditableName)) {
+                    preservedRegions.delete(repeatEditableName);
                 }
             }
+
+            const escapeForRegex = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+            interface EditableWrapOptions {
+                singleLine?: boolean;
+            }
+
+            const wrapInstanceEditable = (name: string, rawContent: string | undefined, options?: EditableWrapOptions): string => {
+                const singleLine = options?.singleLine ?? false;
+                const escName = escapeForRegex(name);
+                let body = rawContent ?? '';
+
+                if (/<!--\s*Template(Begin|End)Editable/i.test(body)) {
+                    body = body
+                        .replace(/<!--\s*TemplateBeginEditable\s+name="([^"]+)"\s*-->/gi, '<!-- InstanceBeginEditable name="$1" -->')
+                        .replace(/<!--\s*TemplateEndEditable\s*-->/gi, '<!-- InstanceEndEditable -->');
+                }
+
+                const fullInstanceBlockRe = new RegExp(`^\\s*<!--\\s*InstanceBeginEditable\\s+name="${escName}"\\s*-->[\\s\\S]*<!--\\s*InstanceEndEditable\\s*-->\\s*$`, 'i');
+                if (fullInstanceBlockRe.test(body)) {
+                    return body;
+                }
+
+                let working = body;
+                let removedLeading = false;
+                const leadingRe = new RegExp(`^\\s*<!--\\s*InstanceBeginEditable\\s+name="${escName}"\\s*-->`, 'i');
+                if (leadingRe.test(working)) {
+                    working = working.replace(leadingRe, '');
+                    removedLeading = true;
+                }
+                if (removedLeading) {
+                    const trailingRe = /\s*<!--\s*InstanceEndEditable\s*-->\s*$/i;
+                    if (trailingRe.test(working)) {
+                        working = working.replace(trailingRe, '');
+                    }
+                }
+
+                if (!singleLine) {
+                    const needsLead = working.length > 0 && !working.startsWith('\n');
+                    const needsTail = working.length > 0 && !working.endsWith('\n');
+                    if (needsLead) {
+                        working = '\n' + working;
+                    }
+                    if (needsTail) {
+                        working = working + '\n';
+                    }
+                }
+
+                return `<!-- InstanceBeginEditable name="${name}" -->${working}<!-- InstanceEndEditable -->`;
+            };
 
             // Build segments (static/region)
             type Segment = { kind: 'static'; text: string } | { kind: 'region'; region: ParsedRegion };
             const segments: Segment[] = [];
             let cursor = 0;
-            for (const r of parsedRegions) {
+            for (const r of topLevelRegions) {
                 if (r.begin > cursor) {
                     segments.push({ kind: 'static', text: templateContent.slice(cursor, r.begin) });
                 }
@@ -847,6 +963,10 @@ export function activate(context: vscode.ExtensionContext) {
                     rebuilt += s.text;
                 } else {
                     const name = s.region.name;
+                    if (namesInsideRepeat.has(name)) {
+                        rebuilt += s.region.full;
+                        continue;
+                    }
                     const preserved = preservedRegions.get(name);
                     const defaultContent = s.region.defaultContent;
                     const contentToUse = preserved !== undefined ? preserved : defaultContent;
@@ -855,15 +975,8 @@ export function activate(context: vscode.ExtensionContext) {
                     }
                     // Preserve surrounding whitespace style: check if original full was single-line
                     const singleLine = !/\n/.test(s.region.full.trim());
-                    const openTag = `<!-- InstanceBeginEditable name="${name}" -->`;
-                    const closeTag = `<!-- InstanceEndEditable -->`;
-                    if (singleLine) {
-                        rebuilt += `${openTag}${contentToUse}${closeTag}`;
-                    } else {
-                        // Ensure content retains leading/trailing newlines as in preserved or default
-                        let c = contentToUse;
-                        rebuilt += `${openTag}${c}${closeTag}`;
-                    }
+                    const wrapped = wrapInstanceEditable(name, contentToUse, { singleLine });
+                    rebuilt += wrapped;
                 }
             }
 
@@ -944,7 +1057,8 @@ export function activate(context: vscode.ExtensionContext) {
                 if (!templateRegionNames.has(pName) && allTemplateEditableNames.has(pName)) {
                     const blockRe = new RegExp(`<!--\\s*TemplateBeginEditable\\s+name="${pName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"\\s*-->([\\s\\S]*?)<!--\\s*TemplateEndEditable\\s*-->`, 'i');
                     if (blockRe.test(rebuilt)) {
-                        rebuilt = rebuilt.replace(blockRe, `<!-- InstanceBeginEditable name="${pName}" -->${pContent}<!-- InstanceEndEditable -->`);
+                        const preferSingleLine = !/\n/.test(pContent);
+                        rebuilt = rebuilt.replace(blockRe, wrapInstanceEditable(pName, pContent, { singleLine: preferSingleLine }));
                         console.log(`[DW-MERGE] Fallback injected preserved region "${pName}" into rebuilt content`);
                     }
                 }
@@ -1060,8 +1174,159 @@ export function activate(context: vscode.ExtensionContext) {
             }
             // --- End alternating bgcolor enforcement ---
 
+            // Detect nested editable scenario (child template based on parent template)
+            let nestedEditableMode = false;
+            const ignoredParentEditableNames = new Set<string>();
+            let parentTemplateStructure: TemplateStructureScan | null = null;
+            try {
+                const instBeginMatch = /<!--\s*InstanceBegin\s+template="([^"]+)"[^>]*-->/i.exec(templateContent);
+                if (instBeginMatch) {
+                    const relParent = instBeginMatch[1];
+                    const ws = vscode.workspace.workspaceFolders?.[0];
+                    if (ws) {
+                        const parentFsPath = path.join(ws.uri.fsPath, relParent.replace(/^\//, ''));
+                        if (fs.existsSync(parentFsPath)) {
+                            const parentText = fs.readFileSync(parentFsPath, 'utf8');
+                            parentTemplateStructure = scanTemplateStructure(parentText);
+                            const parentNames = parentTemplateStructure.names;
+                            for (const name of Array.from(parentNames)) {
+                                if (!childStructure.names.has(name) && !instanceEditableNames.has(name)) {
+                                    ignoredParentEditableNames.add(name);
+                                }
+                            }
+                            const childHasTemplateMarkers = childStructure.beginCount > 0;
+                            if (parentNames.size > 0 && (childHasTemplateMarkers || ignoredParentEditableNames.size > 0)) {
+                                nestedEditableMode = true;
+                            }
+                        }
+                    }
+                }
+            } catch { /* non-fatal */ }
+
+            // If nested mode, promote child Template editables to Instance editables with PRESERVED PAGE CONTENT first,
+            // then unwrap parent-level wrapper regions and finally convert any remaining Template editables generically.
+            if (nestedEditableMode) {
+                const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const childTemplateEditableNames = new Set<string>(Array.from(childStructure.names).filter(name => !namesInsideRepeat.has(name)));
+                let before = rebuilt;
+
+                // 1) For every Template editable name declared in child template, if this page already has
+                // an Instance editable with that name, replace the Template block in rebuilt with the PAGE'S preserved content.
+                for (const childName of Array.from(childTemplateEditableNames)) {
+                    if (!preservedRegions.has(childName)) continue; // page didn't override yet; keep template default
+                    const blockRe = new RegExp(`<!--\\s*TemplateBeginEditable\\s+name=\"${esc(childName)}\"\\s*-->([\\s\\S]*?)<!--\\s*TemplateEndEditable\\s*-->`, 'i');
+                    if (blockRe.test(rebuilt)) {
+                        const pContent = preservedRegions.get(childName)!;
+                        const preferSingleLine = !/\n/.test(pContent);
+                        rebuilt = rebuilt.replace(blockRe, wrapInstanceEditable(childName, pContent, { singleLine: preferSingleLine }));
+                        outputChannel.appendLine(`[NESTED] Promoted child editable "${childName}" with page content.`);
+                    }
+                }
+
+                // 2) Convert any remaining Template editables to Instance editables generically
+                rebuilt = rebuilt
+                    .replace(/<!--\s*TemplateBeginEditable\s+name="([^"]+)"\s*-->/gi, '<!-- InstanceBeginEditable name="$1" -->')
+                    .replace(/<!--\s*TemplateEndEditable\s*-->/gi, '<!-- InstanceEndEditable -->');
+
+                // 3) Unwrap parent-level wrappers that the child supersedes with nested child editables
+                const unwrapParentWrapper = (html: string, parentName: string, childNames: Set<string>, instanceNames: Set<string>): string => {
+                    const beginRe = new RegExp(`<!--\\s*InstanceBeginEditable\\s+name=\"${esc(parentName)}\"\\s*-->`, 'gi');
+                    const tokenRe = /(<!--\s*InstanceBeginEditable\b[^>]*-->|<!--\s*InstanceEndEditable\s*-->)/gi;
+                    let out = html;
+                    let m: RegExpExecArray | null;
+                    while ((m = beginRe.exec(out)) !== null) {
+                        const beginStart = m.index;
+                        const afterBegin = beginRe.lastIndex;
+                        tokenRe.lastIndex = afterBegin;
+                        let depth = 1;
+                        let t: RegExpExecArray | null;
+                        let endStart = -1;
+                        let endEnd = -1;
+                        while ((t = tokenRe.exec(out)) !== null) {
+                            const tok = t[1];
+                            if (/InstanceBeginEditable/i.test(tok)) depth++;
+                            else if (/InstanceEndEditable/i.test(tok)) depth--;
+                            if (depth === 0) {
+                                endStart = t.index;
+                                endEnd = tokenRe.lastIndex;
+                                break;
+                            }
+                        }
+                        if (endStart === -1) break; // unmatched; bail
+                        const segment = out.slice(beginStart, endEnd);
+                        let containsChild = false;
+                        for (const cn of Array.from(childNames)) {
+                            const cnRe = new RegExp(`<!--\\s*InstanceBeginEditable\\s+name=\"${esc(cn)}\"`, 'i');
+                            if (cnRe.test(segment)) { containsChild = true; break; }
+                        }
+                        const shouldUnwrap = containsChild || !instanceNames.has(parentName);
+                        if (shouldUnwrap) {
+                            const before = out.slice(0, beginStart);
+                            const middle = out.slice(afterBegin, endStart);
+                            const after = out.slice(endEnd);
+                            out = before + middle + after;
+                            beginRe.lastIndex = Math.max(0, beginStart - 1);
+                        }
+                    }
+                    return out;
+                };
+                for (const parentName of Array.from(ignoredParentEditableNames)) {
+                    rebuilt = unwrapParentWrapper(rebuilt, parentName, childTemplateEditableNames, instanceEditableNames);
+                }
+
+                // 4) Reinstate page-specific content for nested child editables so template defaults never overwrite instances
+                for (const childName of Array.from(childTemplateEditableNames)) {
+                    const preserved = preservedRegions.get(childName);
+                    if (preserved === undefined) continue;
+                    const pattern = new RegExp(`(<!--\\s*InstanceBeginEditable\\s+name=\"${esc(childName)}\"\\s*-->)([\\s\\S]*?)(<!--\\s*InstanceEndEditable\\s*-->)`, 'i');
+                    if (pattern.test(rebuilt)) {
+                        rebuilt = rebuilt.replace(pattern, `$1${preserved}$3`);
+                    }
+                }
+
+                if (before !== rebuilt) {
+                    outputChannel.appendLine('[NESTED] Promoted child editables and unwrapped parent wrapper(s).');
+                }
+            }
+
+            // After all nested handling, restore preserved repeat blocks wholesale.
+            if (instanceRepeatBlocks.size) {
+                const replaceRepeatBlock = (name: string, block: string): void => {
+                    const escName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                    const anyRepeatRe = new RegExp(`<!--\\s*(?:Template|Instance)BeginRepeat\\s+name="${escName}"\\s*-->[\\s\\S]*?<!--\\s*(?:Template|Instance)EndRepeat\\s*-->`, 'gi');
+                    if (anyRepeatRe.test(rebuilt)) {
+                        rebuilt = rebuilt.replace(anyRepeatRe, block);
+                    }
+                };
+                for (const [repeatName, instBlock] of instanceRepeatBlocks.entries()) {
+                    replaceRepeatBlock(repeatName, instBlock);
+                }
+            }
+
             // Safety guard: comprehensive validation
             const safetyIssues: string[] = [];
+
+            const registerStructureIssues = (label: string, scan: TemplateStructureScan | null): void => {
+                if (!scan) return;
+                if (scan.beginCount !== scan.endCount) {
+                    safetyIssues.push(`${label} editable markers mismatch (${scan.beginCount} begin vs ${scan.endCount} end)`);
+                }
+                const duplicateNames: string[] = [];
+                for (const [name, stats] of scan.nameStats.entries()) {
+                    const outsideRepeat = stats.total - stats.insideRepeat;
+                    if (outsideRepeat > 1) {
+                        duplicateNames.push(name);
+                    }
+                }
+                if (duplicateNames.length) {
+                    safetyIssues.push(`${label} duplicate editable name(s): ${duplicateNames.join(', ')}`);
+                }
+            };
+
+            registerStructureIssues('Template', childStructure);
+            if (parentTemplateStructure) {
+                registerStructureIssues('Parent template', parentTemplateStructure);
+            }
             // A) Check that preserved region presence isn't lost
             for (const [rName, rContent] of preservedRegions.entries()) {
                 if (!allTemplateEditableNames.has(rName)) continue;
@@ -1069,6 +1334,10 @@ export function activate(context: vscode.ExtensionContext) {
                     const hasRegion = new RegExp(`<!--\\s*InstanceBeginEditable\\s+name=\"${rName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\"`, 'i').test(rebuilt);
                     if (!hasRegion) safetyIssues.push(`Missing repeat editable region: "${rName}"`);
                 } else {
+                    if (nestedEditableMode && ignoredParentEditableNames.has(rName)) {
+                        // This is a parent wrapper region intentionally removed; don't require preserved content
+                        continue;
+                    }
                     const trimmed = rContent.trim();
                     const snippet = trimmed.slice(0, Math.min(40, trimmed.length));
                     if (snippet && !rebuilt.includes(snippet)) safetyIssues.push(`Lost content for region: "${rName}"`);
@@ -1080,9 +1349,12 @@ export function activate(context: vscode.ExtensionContext) {
                 return (content.match(re) || []).length;
             };
             for (const name of allTemplateEditableNames) {
+                if (namesInsideRepeat.has(name)) continue;
                 const instCount = countOcc(instanceContent, name);
                 const rebCount = countOcc(rebuilt, name);
-                if (instCount > 0 && rebCount < instCount) {
+                // In nestedEditableMode, tolerate missing parent-level editables not present in child
+                const tolerateMissing = nestedEditableMode && ignoredParentEditableNames.has(name);
+                if (!tolerateMissing && instCount > 0 && rebCount < instCount) {
                     safetyIssues.push(`Region "${name}": count decreased (${rebCount} < ${instCount})`);
                 }
             }
@@ -1104,11 +1376,13 @@ export function activate(context: vscode.ExtensionContext) {
             if (rebuilt !== instanceContent) {
                 // D) Size & static shrink checks
                 const ratio = rebuilt.length / Math.max(1, instanceContent.length);
-                if (instanceContent.length > 500 && ratio < 0.4) {
+                const minRatio = nestedEditableMode ? 0.25 : 0.4;
+                if (instanceContent.length > 500 && ratio < minRatio) {
                     safetyIssues.push(`Rebuilt size ratio too small (${ratio.toFixed(2)})`);
                 }
                 const rebuiltStaticBytes = rebuilt.replace(/<!--\s*InstanceBeginEditable[\s\S]*?InstanceEndEditable\s*-->/g,'').length;
-                if (rebuiltStaticBytes < originalStaticBytes * 0.5) {
+                const staticThreshold = nestedEditableMode ? 0.3 : 0.5;
+                if (rebuiltStaticBytes < originalStaticBytes * staticThreshold) {
                     safetyIssues.push(`Static content reduced significantly (${rebuiltStaticBytes} < ${Math.round(originalStaticBytes * 0.5)})`);
                 }
 
@@ -1171,30 +1445,45 @@ export function activate(context: vscode.ExtensionContext) {
                     const APPLY_ALL = 'Apply to All';
                     const SHOW_DIFF = 'Show Diff';
                     const SKIP = 'Skip';
-                    let decision: string | undefined = await vscode.window.showInformationMessage(
-                        `Update '${path.basename(instancePath)}' with template changes?`,
-                        { modal: true },
-                        APPLY, APPLY_ALL, SHOW_DIFF, SKIP
-                    );
-                    if (decision === SHOW_DIFF) {
-                        // Prepare temp file for diff
+                    const promptMessage = `Update '${path.basename(instancePath)}' with template changes?`;
+                    const siteRoot = path.dirname(path.dirname(templatePath));
+                    const tempDir = path.join(siteRoot, '.dwt-template-protection-temp');
+                    let diffTempPath: string | null = null;
+
+                    const ensureDiffShown = async () => {
                         try {
-                            const siteRoot = path.dirname(path.dirname(templatePath));
-                            const tempDir = path.join(siteRoot, '.dwt-template-protection-temp');
-                            fs.mkdirSync(tempDir, { recursive: true });
-                            const tempPath = path.join(tempDir, path.basename(instancePath));
-                            fs.writeFileSync(tempPath, rebuilt, 'utf8');
-                            await vscode.commands.executeCommand('vscode.diff', vscode.Uri.file(instancePath), vscode.Uri.file(tempPath), `Diff: ${path.basename(instancePath)}`);
+                            if (!diffTempPath) {
+                                fs.mkdirSync(tempDir, { recursive: true });
+                                diffTempPath = path.join(tempDir, path.basename(instancePath));
+                                fs.writeFileSync(diffTempPath, rebuilt, 'utf8');
+                            } else {
+                                fs.writeFileSync(diffTempPath, rebuilt, 'utf8');
+                            }
+                            await vscode.commands.executeCommand(
+                                'vscode.diff',
+                                vscode.Uri.file(instancePath),
+                                vscode.Uri.file(diffTempPath),
+                                `Diff: ${path.basename(instancePath)}`
+                            );
                         } catch (e) {
                             vscode.window.showErrorMessage('Failed to show diff.');
                         }
-                        // secondary popup after diff
+                    };
+
+                    let decision: string | undefined;
+                    while (true) {
                         decision = await vscode.window.showInformationMessage(
-                            `Apply template changes to '${path.basename(instancePath)}'?`,
+                            promptMessage,
                             { modal: true },
-                            APPLY, APPLY_ALL, SKIP
+                            APPLY, APPLY_ALL, SHOW_DIFF, SKIP
                         );
+                        if (decision === SHOW_DIFF) {
+                            await ensureDiffShown();
+                            continue;
+                        }
+                        break;
                     }
+
                     if (decision === APPLY_ALL) {
                         applyToAllForRun = true;
                         fs.writeFileSync(instancePath, rebuilt, 'utf8');
@@ -1209,7 +1498,7 @@ export function activate(context: vscode.ExtensionContext) {
                         cancelRunForRun = true;
                         logProcessCompletion('updateHtmlLikeDreamweaver:run-cancelled', 2);
                         return { status: 'cancelled' };
-                    } else { // SKIP or unexpected label
+                    } else { // unexpected label
                         logProcessCompletion('updateHtmlLikeDreamweaver:item-skipped', 3);
                         return { status: 'skipped' };
                     }

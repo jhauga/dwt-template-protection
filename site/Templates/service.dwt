@@ -29,10 +29,36 @@
      <div class="dropdown-content">
       <a href="/webDevelopment.html">Web Development</a>
       <a href="/graphicDesign.html">Graphic Design</a>
+      <a href="/seo-optimization.html">SEO Optimization</a>
+      <a href="/ux-ui-design.html">UX/UI Design</a>
+      <a href="/e-commerce-storefront.html">E-commerce Storefront</a>
      </div>
     </li>
     <li><a href="/contact.html">Contact</a></li>
    </ul>
+   <!-- InstanceBeginEditable name="pageMenu" -->    
+    <div class="page-menu" role="navigation" aria-label="Service page menu">
+     <ul class="page-menu-list">
+      <li><a href="/webDevelopment.html">Web Development</a></li>
+      <li><a href="/graphicDesign.html">Graphic Design</a></li>
+      <li><a href="/seo-optimization.html">SEO Optimization</a></li>
+      <li><a href="/ux-ui-design.html">UX/UI Design</a></li>
+      <li><a href="/e-commerce-storefront.html">E-commerce Storefront</a></li>
+     </ul>     
+    </div>
+  <!-- TemplateBeginEditable name="topAnchor" -->
+   <div class="page-anchors" role="navigation" aria-label="On-page section links">
+    <ul class="page-anchors-list">
+     <li><a href="#anchor">section_for_page</a></li>
+     <!-- Example additional items (optional): 
+     <li><a href="#features">Features</a></li>
+     <li><a href="#pricing">Pricing</a></li>
+     <li><a href="#faq">FAQ</a></li>
+     -->
+    </ul>
+   </div>
+  <!-- TemplateEndEditable -->
+   <!-- InstanceEndEditable -->
   </nav>
  </div>
  
